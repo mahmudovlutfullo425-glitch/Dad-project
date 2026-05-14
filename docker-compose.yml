@@ -50,6 +50,9 @@ services:
       - CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-*}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
       - OTEL_SERVICE_NAME=api
+      # Public mount point behind the gateway. Surfaces in OpenAPI so
+      # Swagger UI's "Try it out" requests include the /api/ prefix.
+      - API_ROOT_PATH=/api
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status==200 else 1)"]
       interval: 10s
