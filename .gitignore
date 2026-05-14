@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env files (keep .env.example)
+.env
+.env.local
+.env.*.local
+
+# Docker volumes
+data/
+volumes/
+
+# Build artefacts
+target/
+*.class
+
+# Test coverage
+htmlcov/
+.coverage
+coverage.xml

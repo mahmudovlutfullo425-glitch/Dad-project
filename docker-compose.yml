@@ -1,0 +1,291 @@
+name: ecommerce-flashsale
+
+services:
+  # ---------------- Gateway ----------------
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: ecom-gateway
+    ports:
+      - "${GATEWAY_HTTP_PORT:-80}:80"
+      - "${GATEWAY_HTTPS_PORT:-443}:443"
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Backend API (x2 replicas behind gateway) ----------------
+  api:
+    build:
+      context: ./api
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - MEILI_HOST=${MEILI_HOST}
+      - MEILI_PORT=${MEILI_PORT}
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+      - INVENTORY_HOST=${INVENTORY_HOST}
+      - INVENTORY_GRPC_PORT=${INVENTORY_GRPC_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_ALGORITHM=${JWT_ALGORITHM}
+      - JWT_EXPIRY_MINUTES=${JWT_EXPIRY_MINUTES}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=api
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  # ---------------- Inventory service (gRPC) ----------------
+  inventory:
+    build:
+      context: ./inventory
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - INVENTORY_GRPC_PORT=${INVENTORY_GRPC_PORT}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=inventory
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Celery worker ----------------
+  worker:
+    build:
+      context: ./api
+    command: celery -A app.worker worker --loglevel=info
+    environment:
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
+      - OTEL_SERVICE_NAME=worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Celery beat (scheduler) ----------------
+  beat:
+    build:
+      context: ./api
+    command: celery -A app.worker beat --loglevel=info
+    environment:
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Frontend ----------------
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Postgres ----------------
+  db:
+    image: postgres:16-alpine
+    container_name: ecom-db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------- Redis ----------------
+  redis:
+    image: redis:7-alpine
+    container_name: ecom-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------- Meilisearch ----------------
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    container_name: ecom-meilisearch
+    environment:
+      - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+      - MEILI_ENV=development
+    volumes:
+      - meili_data:/meili_data
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7700/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------- ClickHouse ----------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: ecom-clickhouse
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------- NATS (event stream) ----------------
+  nats:
+    image: nats:2.10-alpine
+    container_name: ecom-nats
+    command: ["-js"]
+    networks:
+      - ecom-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ---------------- OpenTelemetry Collector ----------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: ecom-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    networks:
+      - ecom-net
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    restart: unless-stopped
+
+  # ---------------- Tempo (traces) ----------------
+  tempo:
+    image: grafana/tempo:2.6.0
+    container_name: ecom-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Loki (logs) ----------------
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: ecom-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Prometheus (metrics) ----------------
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: ecom-prometheus
+    networks:
+      - ecom-net
+    restart: unless-stopped
+
+  # ---------------- Grafana ----------------
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: ecom-grafana
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - ecom-net
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    restart: unless-stopped
+
+# ---------------- Volumes ----------------
+volumes:
+  pg_data:
+  redis_data:
+  meili_data:
+  ch_data:
+  grafana_data:
+
+# ---------------- Networks ----------------
+networks:
+  ecom-net:
+    driver: bridge

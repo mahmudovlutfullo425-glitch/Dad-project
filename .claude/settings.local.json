@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:claude.ai)",
+      "PowerShell($dirs = @\\('api','inventory','frontend','migrations','gateway','observability\\\\otel-collector','observability\\\\prometheus','observability\\\\tempo','observability\\\\loki','observability\\\\grafana','docs\\\\adr','docs\\\\bpmn','docs\\\\diagrams','scripts'\\); foreach \\($d in $dirs\\) { New-Item -ItemType Directory -Path $d -Force | Out-Null; New-Item -ItemType File -Path \"$d\\\\.gitkeep\" -Force | Out-Null }; Get-ChildItem -Recurse -Force -Include '.gitkeep' | Select-Object FullName)",
+      "PowerShell(Get-ChildItem -Recurse -Force -Filter '.gitkeep' | ForEach-Object { $_.FullName })",
+      "PowerShell($v = docker --version 2>&1; if \\($LASTEXITCODE -eq 0\\) { Write-Output \"docker:OK $v\" } else { Write-Output \"docker:MISSING\" })",
+      "Bash(git --version)",
+      "Bash(git config *)",
+      "Bash(git ls-remote *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(git init *)",
+      "Bash(git remote *)",
+      "PowerShell(New-Item -ItemType File -Path 'api\\\\.gitkeep' -Force)",
+      "PowerShell(New-Item -ItemType File -Path 'scripts\\\\.gitkeep' -Force)",
+      "PowerShell(New-Item -ItemType Directory -Path 'migrations' -Force)",
+      "PowerShell(New-Item -ItemType File -Path 'migrations\\\\.gitkeep' -Force)"
+    ]
+  }
+}
