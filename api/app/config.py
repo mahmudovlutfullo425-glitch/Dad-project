@@ -22,7 +22,17 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 60
 
+    # CORS — comma-separated list of allowed origins, "*" for any
+    cors_allow_origins: str = "*"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        raw = self.cors_allow_origins.strip()
+        if raw == "*" or raw == "":
+            return ["*"]
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
     @property
     def sync_database_url(self) -> str:
