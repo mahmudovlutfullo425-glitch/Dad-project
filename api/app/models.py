@@ -202,7 +202,11 @@ class FlashSale(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[FlashSaleStatus] = mapped_column(
-        Enum(FlashSaleStatus, name="flash_sale_status"),
+        Enum(
+            FlashSaleStatus,
+            name="flash_sale_status",
+            values_callable=lambda x: [e.value for e in x],
+        ),
         default=FlashSaleStatus.SCHEDULED,
         nullable=False,
     )
@@ -295,7 +299,11 @@ class Order(Base):
         BigInteger, ForeignKey("addresses.id", ondelete="RESTRICT"), nullable=False
     )
     status: Mapped[OrderStatus] = mapped_column(
-        Enum(OrderStatus, name="order_status"),
+        Enum(
+            OrderStatus,
+            name="order_status",
+            values_callable=lambda x: [e.value for e in x],
+        ),
         default=OrderStatus.PENDING,
         nullable=False,
         index=True,
@@ -362,7 +370,11 @@ class Payment(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     status: Mapped[PaymentStatus] = mapped_column(
-        Enum(PaymentStatus, name="payment_status"),
+        Enum(
+            PaymentStatus,
+            name="payment_status",
+            values_callable=lambda x: [e.value for e in x],
+        ),
         default=PaymentStatus.INITIATED,
         nullable=False,
     )
