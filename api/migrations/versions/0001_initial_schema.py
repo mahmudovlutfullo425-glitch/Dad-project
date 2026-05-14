@@ -19,21 +19,36 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # ---- Enums ----
-    order_status = sa.Enum(
+    # Pre-create the types via raw DDL, then build column types with
+    # `postgresql.ENUM(..., create_type=False)` so op.create_table does
+    # not try to CREATE TYPE again on the before_create hook.
+    op.execute(
+        "CREATE TYPE order_status AS ENUM "
+        "('pending','paid','fulfilling','shipped','delivered','cancelled','refunded')"
+    )
+    op.execute(
+        "CREATE TYPE payment_status AS ENUM "
+        "('initiated','captured','failed','refunded')"
+    )
+    op.execute(
+        "CREATE TYPE flash_sale_status AS ENUM "
+        "('scheduled','active','ended','cancelled')"
+    )
+    order_status = postgresql.ENUM(
         "pending", "paid", "fulfilling", "shipped", "delivered", "cancelled", "refunded",
         name="order_status",
+        create_type=False,
     )
-    payment_status = sa.Enum(
+    payment_status = postgresql.ENUM(
         "initiated", "captured", "failed", "refunded",
         name="payment_status",
+        create_type=False,
     )
-    flash_sale_status = sa.Enum(
+    flash_sale_status = postgresql.ENUM(
         "scheduled", "active", "ended", "cancelled",
         name="flash_sale_status",
+        create_type=False,
     )
-    order_status.create(op.get_bind(), checkfirst=True)
-    payment_status.create(op.get_bind(), checkfirst=True)
-    flash_sale_status.create(op.get_bind(), checkfirst=True)
 
     # ---- users ----
     op.create_table(
