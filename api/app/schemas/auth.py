@@ -25,7 +25,10 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    email: EmailStr
+    # Plain str on output: input is already validated as EmailStr at register
+    # time, and re-validating on read rejects RFC-special TLDs like .local
+    # that the seed data uses (admin@ecom.local).
+    email: str
     full_name: str
     is_admin: bool
     created_at: datetime
