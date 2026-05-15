@@ -61,7 +61,12 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
 
         async def wrapped(request, context: grpc.aio.ServicerContext):
             user_id = getattr(request, "user_id", 0) or 0
-            key = rule.key_for(str(user_id))
+            # Namespace the bucket with "grpc:" so this internal-hop
+            # rate limit doesn't share a counter with the api-edge
+            # one. Both layers use the same rule (capacity + refill)
+            # but each gets its own bucket — defense in depth, no
+            # double-billing of tokens per user request.
+            key = f"bucket:grpc:{rule.name}:{user_id}"
 
             try:
                 result = await self._store.try_consume(

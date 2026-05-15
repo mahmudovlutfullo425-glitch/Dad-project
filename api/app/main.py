@@ -16,6 +16,9 @@ from app.ratelimit.redis_backend import RedisBucketStore
 from app.redis_client import close_redis, get_redis, init_redis
 from app.routers import auth as auth_router
 from app.routers import cart as cart_router
+from app.routers import checkout as checkout_router
+from app.routers import flashsales as flashsales_router
+from app.routers import orders as orders_router
 from app.routers import products as products_router
 from app.routers import search as search_router
 from app.search_client import close_search, init_search
@@ -48,6 +51,9 @@ tags_metadata = [
     {"name": "products", "description": "Catalog browsing and (admin) product management."},
     {"name": "cart", "description": "Live shopping cart backed by Redis (7-day TTL)."},
     {"name": "search", "description": "Full-text product search (Meilisearch) with facets."},
+    {"name": "checkout", "description": "Cart → inventory reservation → order placement."},
+    {"name": "orders", "description": "Order history and detail."},
+    {"name": "flashsales", "description": "Flash sales: list, detail, rate-limited fast-buy path."},
     {"name": "system", "description": "Health and platform probes."},
 ]
 
@@ -80,6 +86,9 @@ app.include_router(auth_router.router)
 app.include_router(products_router.router)
 app.include_router(cart_router.router)
 app.include_router(search_router.router)
+app.include_router(checkout_router.router)
+app.include_router(orders_router.router)
+app.include_router(flashsales_router.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness probe")
