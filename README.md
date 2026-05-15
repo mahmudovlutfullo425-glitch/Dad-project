@@ -178,7 +178,7 @@ See [Verifying the stack](#verifying-the-stack) below.
 | `inventory` | built from `./inventory` | 50051 | — | TCP socket open |
 | `worker` | built from `./api` | — (Celery) | — | — |
 | `beat` | built from `./api` | — (Celery beat) | — | — |
-| `frontend` | built from `./frontend` | 3000 | — | — |
+| `frontend` (opt-in) | built from `./frontend` | 3000 | — | — |
 | `db` | postgres:16-alpine | 5432 | — | `pg_isready` |
 | `redis` | redis:7-alpine | 6379 | — | `redis-cli ping` |
 | `meilisearch` | getmeili/meilisearch:v1.10 | 7700 | — | `GET /health` |
@@ -192,6 +192,12 @@ See [Verifying the stack](#verifying-the-stack) below.
 
 All inter-service traffic stays on the private `ecom-net` bridge. Public
 ingress is only via the gateway.
+
+> **About the frontend service.** It's behind a Docker Compose profile
+> until Step 15 ships the Next.js app. `make up` skips it; the gateway
+> still serves the API at `/api/*` and Swagger at `/docs`. The
+> storefront URL (`http://localhost/`) returns 502 until you build the
+> frontend and start it with `docker compose --profile frontend up -d`.
 
 ---
 

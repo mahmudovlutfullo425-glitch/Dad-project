@@ -177,7 +177,12 @@ services:
     restart: unless-stopped
 
   # ---------------- Frontend ----------------
+  # Opt-in via `--profile frontend` until Step 15 ships the Next.js
+  # app. The directory currently only contains a .gitkeep placeholder,
+  # so `docker compose up` would otherwise fail on a missing Dockerfile.
+  # Enable later with: docker compose --profile frontend up -d
   frontend:
+    profiles: ["frontend"]
     build:
       context: ./frontend
     environment:
