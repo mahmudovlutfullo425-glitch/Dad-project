@@ -44,6 +44,11 @@ services:
       - MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
       - INVENTORY_HOST=${INVENTORY_HOST}
       - INVENTORY_GRPC_PORT=${INVENTORY_GRPC_PORT}
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB}
       - JWT_SECRET=${JWT_SECRET}
       - JWT_ALGORITHM=${JWT_ALGORITHM}
       - JWT_EXPIRY_MINUTES=${JWT_EXPIRY_MINUTES}
@@ -65,6 +70,11 @@ services:
       redis:
         condition: service_healthy
       meilisearch:
+        condition: service_healthy
+      # ClickHouse is best-effort for the api (analytics writes are
+      # non-blocking) — wait for healthy so init.sql has run and the
+      # `analytics` database exists before the first emit.
+      clickhouse:
         condition: service_healthy
     networks:
       - ecom-net
@@ -121,6 +131,10 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - REDIS_HOST=${REDIS_HOST}
       - REDIS_PORT=${REDIS_PORT}
+      # The `commit_inventory` task and the stuck-order sweeper both
+      # call the inventory service via the sync gRPC client.
+      - INVENTORY_HOST=${INVENTORY_HOST}
+      - INVENTORY_GRPC_PORT=${INVENTORY_GRPC_PORT}
       - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER}
@@ -132,6 +146,11 @@ services:
       redis:
         condition: service_healthy
       db:
+        condition: service_healthy
+      # Inventory just needs to be listening — first commit_inventory
+      # call will block briefly on cold start, which the autoretry
+      # policy absorbs cleanly.
+      inventory:
         condition: service_healthy
     networks:
       - ecom-net
@@ -228,8 +247,16 @@ services:
       - CLICKHOUSE_DB=${CLICKHOUSE_DB}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      # Lets the bind-mounted init.sql create `analytics` and the MV
+      # without an extra GRANT step.
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     volumes:
       - ch_data:/var/lib/clickhouse
+      # Bind-mounted init script. The clickhouse-server image runs
+      # any *.sql in this directory exactly once, on first boot
+      # when the data volume is empty. Idempotent CREATEs inside
+      # also make re-runs harmless.
+      - ./scripts/clickhouse_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ulimits:
       nofile:
         soft: 262144

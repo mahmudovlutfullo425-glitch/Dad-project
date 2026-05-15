@@ -10,10 +10,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.clickhouse_client import close_clickhouse, init_clickhouse
 from app.config import get_settings
 from app.grpc_client import close_inventory_client, init_inventory_client
 from app.ratelimit.redis_backend import RedisBucketStore
 from app.redis_client import close_redis, get_redis, init_redis
+from app.routers import admin_analytics as admin_analytics_router
 from app.routers import auth as auth_router
 from app.routers import cart as cart_router
 from app.routers import checkout as checkout_router
@@ -36,11 +38,15 @@ async def lifespan(app: FastAPI):
     await init_redis()
     await init_search()
     await init_inventory_client()
+    # ClickHouse is best-effort — init logs and continues if the
+    # service is down so the storefront still boots.
+    await init_clickhouse()
     # Build the rate-limit bucket store on top of the shared Redis
     # client and hang it off app.state so dependency functions in
     # app.ratelimit.middleware can reach it via request.app.state.
     app.state.bucket_store = RedisBucketStore(await get_redis())
     yield
+    await close_clickhouse()
     await close_inventory_client()
     await close_search()
     await close_redis()
@@ -54,6 +60,7 @@ tags_metadata = [
     {"name": "checkout", "description": "Cart → inventory reservation → order placement."},
     {"name": "orders", "description": "Order history and detail."},
     {"name": "flashsales", "description": "Flash sales: list, detail, rate-limited fast-buy path."},
+    {"name": "admin", "description": "Admin-only endpoints (analytics, ops)."},
     {"name": "system", "description": "Health and platform probes."},
 ]
 
@@ -89,6 +96,7 @@ app.include_router(search_router.router)
 app.include_router(checkout_router.router)
 app.include_router(orders_router.router)
 app.include_router(flashsales_router.router)
+app.include_router(admin_analytics_router.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness probe")

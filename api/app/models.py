@@ -314,6 +314,10 @@ class Order(Base):
     flash_sale_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("flash_sales.id", ondelete="SET NULL"), nullable=True
     )
+    # Set when the inventory service issues a reservation at checkout.
+    # The Celery `commit_inventory` task uses it to call
+    # `Inventory.CommitReservation` long after the HTTP request is gone.
+    reservation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     placed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

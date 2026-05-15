@@ -11,12 +11,19 @@ Per-user purchase tracking lives in Redis as ``fs_purchased:{fsid}:{uid}``.
 ``INCRBY quantity`` atomically computes the new total; if it overshoots
 the configured ``per_user_limit`` we ``DECRBY`` it back and reject.
 
-ClickHouse event emission is a Step-11 wire-up; for now we log the
-attempt result so the verification path is still observable.
+Analytics (Step 11): every attempt / acceptance / rejection is fired
+into ClickHouse as a ``flash_sale_events`` row via
+``asyncio.create_task`` — the network write never blocks the
+response. ``rate_limited`` rejections are *not* emitted here: the
+rate-limit middleware short-circuits before this handler runs, so
+we'd never see the request. They show up in the gateway logs and as
+``rate_limit_rejected_total`` Prometheus counters instead.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -29,6 +36,7 @@ from sqlalchemy.orm import selectinload
 
 import inventory_pb2 as pb
 
+from app.clickhouse_client import emit_flash_sale_event
 from app.db import get_db
 from app.deps import get_current_user
 from app.grpc_client import get_inventory_stub
@@ -55,6 +63,45 @@ router = APIRouter(prefix="/flashsales", tags=["flashsales"])
 
 def _purchased_key(flash_sale_id: int, user_id: int) -> str:
     return f"fs_purchased:{flash_sale_id}:{user_id}"
+
+
+# Keep strong refs to the fire-and-forget analytics tasks so the
+# event loop GC doesn't collect them mid-flight. In Python 3.11+
+# `asyncio.create_task` returns a weakly-held task; without this set
+# a short-lived emit task can be reaped before the network write
+# completes.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_emit(
+    flash_sale_id: int,
+    variant_id: int,
+    user_id: int,
+    action: str,
+    quantity: int,
+    t0_ns: int,
+    rejection_reason: str = "",
+) -> None:
+    """Background-fire an analytics row; never awaited, never raises.
+
+    The ``emit_flash_sale_event`` coroutine handles its own errors,
+    but wrapping the ``create_task`` in this helper keeps the call
+    sites at one line each and makes the timing-math (monotonic
+    nanoseconds → ms) live in one place."""
+    latency_ms = max(0, (time.monotonic_ns() - t0_ns) // 1_000_000)
+    task = asyncio.create_task(
+        emit_flash_sale_event(
+            flash_sale_id=flash_sale_id,
+            variant_id=variant_id,
+            user_id=user_id,
+            action=action,
+            quantity=quantity,
+            latency_ms=int(latency_ms),
+            rejection_reason=rejection_reason,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def _is_buyable_now(fs: FlashSale) -> bool:
@@ -121,6 +168,11 @@ async def buy_flashsale(
     db: AsyncSession = Depends(get_db),
     redis: Redis = Depends(get_redis),
 ) -> OrderOut:
+    # Monotonic clock for accurate per-request latency. We resolve to
+    # ms when emitting; the wall clock is set inside the ClickHouse
+    # event itself.
+    t0 = time.monotonic_ns()
+
     # --- 1. Validate flash sale and its current window ---
     fs = await db.scalar(
         select(FlashSale)
@@ -128,10 +180,19 @@ async def buy_flashsale(
         .where(FlashSale.id == flash_sale_id)
     )
     if fs is None:
+        # 404 is a client/URL error — no analytics row.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Flash sale not found"
         )
+
+    # Once we know the sale exists, log every entry as an 'attempt'.
+    _fire_emit(fs.id, payload.variant_id, user.id, "attempt", payload.quantity, t0)
+
     if not _is_buyable_now(fs):
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "sale_not_active",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Flash sale is not currently active",
@@ -141,6 +202,10 @@ async def buy_flashsale(
         (it for it in fs.items if it.variant_id == payload.variant_id), None
     )
     if fs_item is None:
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "unknown_variant",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Variant is not part of this flash sale",
@@ -148,6 +213,10 @@ async def buy_flashsale(
 
     # --- 2. Quantity vs the rule's hard cap (per-item, before INCR) ---
     if payload.quantity > fs_item.per_user_limit:
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "quantity_too_high",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Quantity exceeds per-user limit ({fs_item.per_user_limit})",
@@ -165,6 +234,10 @@ async def buy_flashsale(
 
     if new_total > fs_item.per_user_limit:
         await redis.decrby(counter_key, payload.quantity)
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "per_user_limit_reached",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -182,6 +255,10 @@ async def buy_flashsale(
     )
     if address is None:
         await redis.decrby(counter_key, payload.quantity)
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "no_address",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User has no address on file",
@@ -215,14 +292,26 @@ async def buy_flashsale(
         # rate limit. Translate its RESOURCE_EXHAUSTED to a clean 429
         # rather than letting the AioRpcError surface as a 500.
         if exc.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+            _fire_emit(
+                fs.id, payload.variant_id, user.id, "rejected",
+                payload.quantity, t0, "inventory_rate_limited",
+            )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Inventory rate-limited: {exc.details()}",
                 headers={"Retry-After": "10"},
             )
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "grpc_error",
+        )
         raise
     if not reserve_resp.success:
         await redis.decrby(counter_key, payload.quantity)
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "stock_insufficient",
+        )
         logger.info(
             "flash_sale_attempt: fsid=%s vid=%s user=%s qty=%s status=rejected reason=%s",
             fs.id,
@@ -252,6 +341,7 @@ async def buy_flashsale(
             shipping_fee=shipping_fee,
             total=total,
             flash_sale_id=fs.id,
+            reservation_id=reservation_id,
             items=[
                 OrderItem(
                     variant_id=fs_item.variant_id,
@@ -276,19 +366,35 @@ async def buy_flashsale(
         await db.rollback()
         await redis.decrby(counter_key, payload.quantity)
         await stub.ReleaseReservation(pb.ReleaseRequest(reservation_id=reservation_id))
+        _fire_emit(
+            fs.id, payload.variant_id, user.id, "rejected",
+            payload.quantity, t0, "persist_failed",
+        )
         raise
 
-    # --- 7. Observability hook (Step 11 will write ClickHouse here) ---
+    # --- 7. Hand off to the fulfilment pipeline ---
+    # Imported locally so a Celery / broker import problem can't take
+    # the buy path down — the order is already durably persisted.
+    from app.tasks.order import process_order
+
+    task_id = process_order(order.id)
+
+    # --- 8. Emit `accepted` analytics row ---
+    _fire_emit(
+        fs.id, payload.variant_id, user.id, "accepted", payload.quantity, t0
+    )
+
     logger.info(
-        "flash_sale_attempt: fsid=%s vid=%s user=%s qty=%s order=%s status=accepted",
+        "flash_sale_attempt: fsid=%s vid=%s user=%s qty=%s order=%s chain=%s status=accepted",
         fs.id,
         fs_item.variant_id,
         user.id,
         payload.quantity,
         order.id,
+        task_id,
     )
 
-    # --- 8. Reload with eager relationships for the response ---
+    # --- 9. Reload with eager relationships for the response ---
     fresh = await db.scalar(
         select(Order)
         .options(selectinload(Order.items), selectinload(Order.payment))

@@ -174,6 +174,7 @@ async def checkout(
             subtotal=subtotal,
             shipping_fee=shipping_fee,
             total=total,
+            reservation_id=reservation_id,
             items=order_items,
         )
         db.add(order)
@@ -197,12 +198,17 @@ async def checkout(
     await redis.delete(cart_key)
 
     # --- 7. Hand off to the fulfilment pipeline ---
-    # TODO Step 10: enqueue tasks.order.process_order.delay(order.id)
+    # Imported locally so a Celery / broker import problem can't take
+    # down route handlers that don't touch fulfilment (e.g. /health).
+    from app.tasks.order import process_order
+
+    task_id = process_order(order.id)
     logger.info(
-        "checkout: order %s placed (subtotal=%s, items=%d) — awaiting Celery chain",
+        "checkout: order %s placed (subtotal=%s, items=%d) — chain=%s",
         order.id,
         subtotal,
         len(order_items),
+        task_id,
     )
 
     # --- 8. Reload with eager-loaded relationships for the response ---

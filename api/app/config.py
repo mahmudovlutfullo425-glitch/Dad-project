@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     inventory_host: str = "inventory"
     inventory_grpc_port: int = 50051
 
+    # ClickHouse (analytics)
+    clickhouse_host: str = "clickhouse"
+    clickhouse_port: int = 8123
+    clickhouse_user: str = "ecom"
+    clickhouse_password: str = "ecom_dev_password"
+    clickhouse_db: str = "analytics"
+
     # JWT
     jwt_secret: str = "change_me"
     jwt_algorithm: str = "HS256"
