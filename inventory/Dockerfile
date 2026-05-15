@@ -10,18 +10,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Compile the shared inventory.proto into /app (sys.path root) so the
-# generated `import inventory_pb2` in inventory_pb2_grpc.py resolves
-# without needing a sys.path tweak. The .proto file is duplicated in
-# api/proto/ — see the comment in that file.
+# Compile the proto into /app so the generated `import inventory_pb2`
+# in inventory_pb2_grpc.py resolves naturally against sys.path[0].
 COPY proto/ proto/
 RUN python -m grpc_tools.protoc -I proto \
     --python_out=. \
     --grpc_python_out=. \
     proto/inventory.proto
 
-COPY . .
+COPY app/ app/
 
-EXPOSE 8000
+EXPOSE 50051
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "app.server"]

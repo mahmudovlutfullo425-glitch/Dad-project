@@ -76,6 +76,7 @@ services:
   inventory:
     build:
       context: ./inventory
+    container_name: ecom-inventory
     environment:
       - POSTGRES_HOST=${POSTGRES_HOST}
       - POSTGRES_PORT=${POSTGRES_PORT}
@@ -87,6 +88,17 @@ services:
       - INVENTORY_GRPC_PORT=${INVENTORY_GRPC_PORT}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
       - OTEL_SERVICE_NAME=inventory
+    expose:
+      - "50051"
+    healthcheck:
+      # gRPC doesn't speak HTTP, so a plain TCP socket open is the
+      # cheapest "is the listener up?" check that works without
+      # pulling in grpc-health-probe.
+      test: ["CMD", "python", "-c", "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 50051)); s.close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     depends_on:
       db:
         condition: service_healthy

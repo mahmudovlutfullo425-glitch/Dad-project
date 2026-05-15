@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     meili_port: int = 7700
     meili_master_key: str = "dev_master_key_change_me"
 
+    # Inventory gRPC service
+    inventory_host: str = "inventory"
+    inventory_grpc_port: int = 50051
+
     # JWT
     jwt_secret: str = "change_me"
     jwt_algorithm: str = "HS256"

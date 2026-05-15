@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.grpc_client import close_inventory_client, init_inventory_client
 from app.redis_client import close_redis, init_redis
 from app.routers import auth as auth_router
 from app.routers import cart as cart_router
@@ -25,11 +26,14 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """Open shared external clients on startup, close them on shutdown.
 
-    Order matters: bring up the cheap dependencies (Redis) before the
-    heavier ones (Meilisearch settings push). On shutdown, reverse."""
+    Order matters: cheap dependencies first (Redis), then Meilisearch
+    (which pushes index settings), then the inventory gRPC channel
+    (lazy — no I/O at init time). Shutdown reverses the order."""
     await init_redis()
     await init_search()
+    await init_inventory_client()
     yield
+    await close_inventory_client()
     await close_search()
     await close_redis()
 
