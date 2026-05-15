@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_user
 from app.models import User
+from app.ratelimit.middleware import rate_limit
 from app.schemas.auth import Token, UserOut, UserRegister
 from app.security import create_access_token, hash_password, verify_password
 
@@ -44,6 +45,10 @@ async def register(payload: UserRegister, db: AsyncSession = Depends(get_db)) ->
     "/login",
     response_model=Token,
     summary="Exchange credentials for a JWT access token",
+    # Rate-limit before we even hash the password. Credential
+    # stuffing attempts get bounced cheaply at the gateway hop;
+    # bcrypt-time is the most expensive thing in this handler.
+    dependencies=[Depends(rate_limit("LOGIN_PER_IP"))],
 )
 async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),

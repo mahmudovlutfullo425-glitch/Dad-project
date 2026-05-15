@@ -26,6 +26,8 @@ import inventory_pb2_grpc as pb_grpc
 from app.config import get_settings
 from app.db import AsyncSessionLocal, engine
 from app.models import InventoryLevel
+from app.ratelimit.interceptor import RateLimitInterceptor
+from app.ratelimit.redis_backend import RedisBucketStore
 from app.redis_client import close_redis, get_redis, init_redis
 from app.service import InventoryServicer
 
@@ -79,7 +81,12 @@ async def serve() -> None:
     await init_redis()
     await bootstrap_stock_counters()
 
-    server = grpc.aio.server()
+    # The interceptor uses the same Redis client as the rest of the
+    # service (DB 0, shared with api). A separate bucket store wraps
+    # it so rate-limit ops stay isolated from inventory mutations.
+    bucket_store = RedisBucketStore(await get_redis())
+
+    server = grpc.aio.server(interceptors=[RateLimitInterceptor(bucket_store)])
     pb_grpc.add_InventoryServicer_to_server(InventoryServicer(), server)
 
     # Server reflection — lets `grpcurl` and `grpc_cli` introspect

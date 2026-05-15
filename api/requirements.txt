@@ -19,3 +19,4 @@ meilisearch-python-sdk==7.1.5
 grpcio==1.66.2
 grpcio-tools==1.66.2
 protobuf==5.28.2
+prometheus-client==0.21.0

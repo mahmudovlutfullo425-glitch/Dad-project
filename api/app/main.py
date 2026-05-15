@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.grpc_client import close_inventory_client, init_inventory_client
-from app.redis_client import close_redis, init_redis
+from app.ratelimit.redis_backend import RedisBucketStore
+from app.redis_client import close_redis, get_redis, init_redis
 from app.routers import auth as auth_router
 from app.routers import cart as cart_router
 from app.routers import products as products_router
@@ -32,6 +33,10 @@ async def lifespan(app: FastAPI):
     await init_redis()
     await init_search()
     await init_inventory_client()
+    # Build the rate-limit bucket store on top of the shared Redis
+    # client and hang it off app.state so dependency functions in
+    # app.ratelimit.middleware can reach it via request.app.state.
+    app.state.bucket_store = RedisBucketStore(await get_redis())
     yield
     await close_inventory_client()
     await close_search()

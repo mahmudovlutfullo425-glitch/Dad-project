@@ -19,6 +19,7 @@ RUN python -m grpc_tools.protoc -I proto \
     proto/inventory.proto
 
 COPY app/ app/
+COPY pytest.ini ./
 
 EXPOSE 50051
 
