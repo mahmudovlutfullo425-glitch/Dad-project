@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     redis_host: str = "redis"
     redis_port: int = 6379
 
+    # Meilisearch
+    meili_host: str = "meilisearch"
+    meili_port: int = 7700
+    meili_master_key: str = "dev_master_key_change_me"
+
     # JWT
     jwt_secret: str = "change_me"
     jwt_algorithm: str = "HS256"

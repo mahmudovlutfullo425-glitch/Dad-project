@@ -16,6 +16,7 @@ from app.schemas.product import (
     ProductOut,
     ProductUpdate,
 )
+from app.search_client import SearchClient, build_search_doc, get_search
 
 router = APIRouter(tags=["products"])
 
@@ -26,6 +27,34 @@ def _product_query():
         selectinload(Product.category),
         selectinload(Product.variants),
     )
+
+
+def _product_query_with_inventory():
+    """Same as _product_query but also pulls each variant's inventory row.
+    Used when building a search document so ``in_stock`` is accurate."""
+    return select(Product).options(
+        selectinload(Product.category),
+        selectinload(Product.variants).selectinload(ProductVariant.inventory_level),
+    )
+
+
+async def _sync_to_search(product_id: int, db: AsyncSession, search: SearchClient) -> None:
+    """Push the current Postgres state of a product to Meilisearch.
+
+    Re-fetches with eager-loaded relationships so the document carries
+    the correct ``in_stock`` flag and category name. Soft-deleted
+    products are removed from the index rather than left as stale
+    rows the search router would have to filter out."""
+    fresh = await db.scalar(
+        _product_query_with_inventory().where(Product.id == product_id)
+    )
+    if fresh is None:
+        await search.delete_product(product_id)
+        return
+    if not fresh.is_active:
+        await search.delete_product(product_id)
+        return
+    await search.index_product(build_search_doc(fresh))
 
 
 # --- Categories ---
@@ -108,6 +137,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)) -> Pr
 async def create_product(
     payload: ProductCreate,
     db: AsyncSession = Depends(get_db),
+    search: SearchClient = Depends(get_search),
     _: User = Depends(get_current_admin),
 ) -> ProductOut:
     category = await db.get(Category, payload.category_id)
@@ -142,6 +172,9 @@ async def create_product(
 
     # Reload with relationships for the response.
     fresh = await db.scalar(_product_query().where(Product.id == product.id))
+    # Push to Meilisearch inline. Step 10 will move this to a Celery task
+    # so the HTTP path doesn't depend on search-cluster availability.
+    await _sync_to_search(product.id, db, search)
     return ProductOut.model_validate(fresh)
 
 
@@ -154,6 +187,7 @@ async def update_product(
     product_id: int,
     payload: ProductUpdate,
     db: AsyncSession = Depends(get_db),
+    search: SearchClient = Depends(get_search),
     _: User = Depends(get_current_admin),
 ) -> ProductOut:
     product = await db.get(Product, product_id)
@@ -175,6 +209,7 @@ async def update_product(
     await db.commit()
 
     fresh = await db.scalar(_product_query().where(Product.id == product.id))
+    await _sync_to_search(product.id, db, search)
     return ProductOut.model_validate(fresh)
 
 
@@ -186,6 +221,7 @@ async def update_product(
 async def delete_product(
     product_id: int,
     db: AsyncSession = Depends(get_db),
+    search: SearchClient = Depends(get_search),
     _: User = Depends(get_current_admin),
 ) -> Response:
     product = await db.get(Product, product_id)
@@ -193,4 +229,6 @@ async def delete_product(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
     product.is_active = False
     await db.commit()
+    # _sync_to_search sees is_active=False and removes it from the index.
+    await _sync_to_search(product_id, db, search)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

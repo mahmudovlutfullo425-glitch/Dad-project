@@ -1,7 +1,7 @@
 """FastAPI application entrypoint.
 
-Wires up routers, OpenAPI metadata, CORS, the shared Redis client
-lifespan, and a liveness probe.
+Wires up routers, OpenAPI metadata, CORS, the shared Redis + Meilisearch
+client lifespan, and a liveness probe.
 Run with: `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
 """
 import os
@@ -15,15 +15,22 @@ from app.redis_client import close_redis, init_redis
 from app.routers import auth as auth_router
 from app.routers import cart as cart_router
 from app.routers import products as products_router
+from app.routers import search as search_router
+from app.search_client import close_search, init_search
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Open shared external clients on startup, close them on shutdown."""
+    """Open shared external clients on startup, close them on shutdown.
+
+    Order matters: bring up the cheap dependencies (Redis) before the
+    heavier ones (Meilisearch settings push). On shutdown, reverse."""
     await init_redis()
+    await init_search()
     yield
+    await close_search()
     await close_redis()
 
 
@@ -31,6 +38,7 @@ tags_metadata = [
     {"name": "auth", "description": "Registration, login, current user."},
     {"name": "products", "description": "Catalog browsing and (admin) product management."},
     {"name": "cart", "description": "Live shopping cart backed by Redis (7-day TTL)."},
+    {"name": "search", "description": "Full-text product search (Meilisearch) with facets."},
     {"name": "system", "description": "Health and platform probes."},
 ]
 
@@ -62,6 +70,7 @@ app.add_middleware(
 app.include_router(auth_router.router)
 app.include_router(products_router.router)
 app.include_router(cart_router.router)
+app.include_router(search_router.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness probe")
