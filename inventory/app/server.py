@@ -26,6 +26,7 @@ import inventory_pb2_grpc as pb_grpc
 from app.config import get_settings
 from app.db import AsyncSessionLocal, engine
 from app.models import InventoryLevel
+from app.observability import setup_telemetry
 from app.ratelimit.interceptor import RateLimitInterceptor
 from app.ratelimit.redis_backend import RedisBucketStore
 from app.redis_client import close_redis, get_redis, init_redis
@@ -77,6 +78,11 @@ async def bootstrap_stock_counters() -> None:
 
 async def serve() -> None:
     settings = get_settings()
+
+    # Bring up tracing + the Prometheus sidecar BEFORE we open Redis
+    # or create the gRPC server, so the bootstrap step (which hits
+    # Postgres and Redis) is itself traced and visible end-to-end.
+    setup_telemetry(service_name="inventory")
 
     await init_redis()
     await bootstrap_stock_counters()

@@ -28,7 +28,13 @@ import inventory_pb2_grpc as pb_grpc
 from app.db import AsyncSessionLocal
 from app.lua_scripts import RESERVE_STOCK_LUA
 from app.models import InventoryLevel
+from app.observability import STOCK_DECREMENT_LATENCY, get_tracer
 from app.redis_client import get_redis
+
+# Module-level tracer for the manual spans below. The OTel SDK
+# returns a NoopTracer if `setup_telemetry` hasn't run, so this is
+# safe to call at import time.
+_tracer = get_tracer()
 
 
 def _decode(value) -> str:
@@ -52,15 +58,31 @@ class InventoryServicer(pb_grpc.InventoryServicer):
 
     async def _eval_reserve(self, redis, idem_key: str, argv: list[str]):
         """EVALSHA with a NOSCRIPT-resilient fallback. If Redis was
-        restarted since we last SCRIPT LOAD'd, we reload and retry."""
+        restarted since we last SCRIPT LOAD'd, we reload and retry.
+
+        Wrapped in a manual span + a histogram observation so the
+        flash-sale Grafana dashboard can chart the decrement latency
+        distribution end-to-end."""
         await self._ensure_script_loaded(redis)
-        try:
-            return await redis.evalsha(self._reserve_sha, 1, idem_key, *argv)
-        except Exception as exc:  # redis-py wraps server errors variably
-            if "NOSCRIPT" not in str(exc).upper():
-                raise
-            self._reserve_sha = await redis.script_load(RESERVE_STOCK_LUA)
-            return await redis.evalsha(self._reserve_sha, 1, idem_key, *argv)
+        # Histogram .time() observes elapsed seconds on exit even when
+        # the body raises — important so failed reserves still show
+        # up in the latency panel rather than masking a slow path.
+        with STOCK_DECREMENT_LATENCY.time():
+            with _tracer.start_as_current_span("inventory.reserve_lua") as span:
+                span.set_attribute("ratelimit.idem_key", idem_key)
+                span.set_attribute("inventory.items", (len(argv) - 4) // 2)
+                try:
+                    return await redis.evalsha(
+                        self._reserve_sha, 1, idem_key, *argv
+                    )
+                except Exception as exc:  # redis-py wraps errors variably
+                    if "NOSCRIPT" not in str(exc).upper():
+                        raise
+                    span.add_event("noscript_reload")
+                    self._reserve_sha = await redis.script_load(RESERVE_STOCK_LUA)
+                    return await redis.evalsha(
+                        self._reserve_sha, 1, idem_key, *argv
+                    )
 
     # ---------- RPC methods ----------
 

@@ -31,6 +31,9 @@ services:
       context: ./api
     expose:
       - "8000"
+      # Prometheus sidecar — scraped by prometheus at /metrics. Not
+      # routed through the gateway; never reaches the public surface.
+      - "9000"
     environment:
       - POSTGRES_HOST=${POSTGRES_HOST}
       - POSTGRES_PORT=${POSTGRES_PORT}
@@ -100,6 +103,8 @@ services:
       - OTEL_SERVICE_NAME=inventory
     expose:
       - "50051"
+      # Prometheus metrics sidecar (started by app.observability).
+      - "9000"
     healthcheck:
       # gRPC doesn't speak HTTP, so a plain TCP socket open is the
       # cheapest "is the listener up?" check that works without
@@ -294,6 +299,12 @@ services:
     image: otel/opentelemetry-collector-contrib:0.110.0
     container_name: ecom-otel-collector
     command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otel-collector-config.yaml:ro
+    expose:
+      - "4317"   # OTLP/gRPC ingress for apps
+      - "4318"   # OTLP/HTTP ingress (unused but kept for future clients)
+      - "8889"   # Prometheus scrape target (collector → prometheus)
     networks:
       - ecom-net
     depends_on:
@@ -307,6 +318,12 @@ services:
     image: grafana/tempo:2.6.0
     container_name: ecom-tempo
     command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    expose:
+      - "3200"   # Tempo HTTP query API (Grafana queries here)
+      - "4317"   # OTLP/gRPC ingress (collector pushes here)
     networks:
       - ecom-net
     restart: unless-stopped
@@ -316,6 +333,11 @@ services:
     image: grafana/loki:3.2.0
     container_name: ecom-loki
     command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./observability/loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    expose:
+      - "3100"   # Loki HTTP API (push + query)
     networks:
       - ecom-net
     restart: unless-stopped
@@ -324,6 +346,18 @@ services:
   prometheus:
     image: prom/prometheus:v2.55.0
     container_name: ecom-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    ports:
+      # Map to host so the operator can `curl localhost:9090/api/v1/query`
+      # during the viva. Internal traffic still uses the docker DNS name.
+      - "9090:9090"
     networks:
       - ecom-net
     restart: unless-stopped
@@ -335,7 +369,15 @@ services:
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor,traceToMetrics
+      - GF_USERS_DEFAULT_THEME=light
+    ports:
+      # 3001 on the host so it doesn't clash with anything else; 3000
+      # stays the Grafana internal port (matches the official image).
+      - "3001:3000"
     volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     networks:
       - ecom-net
@@ -352,6 +394,9 @@ volumes:
   meili_data:
   ch_data:
   grafana_data:
+  tempo_data:
+  loki_data:
+  prom_data:
 
 # ---------------- Networks ----------------
 networks:

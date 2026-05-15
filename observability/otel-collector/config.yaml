@@ -1,0 +1,76 @@
+# OpenTelemetry Collector — single ingress for traces, logs, metrics
+# from every instrumented service. Fans out to Tempo / Loki /
+# Prometheus, batching to keep network chatter low under flash-sale
+# load. All exporters use `insecure: true` because everything stays
+# on the internal `ecom-net` bridge — TLS would cost cycles for no
+# real gain.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Group spans/logs/metrics before flushing — cuts the per-batch
+  # protocol overhead by 10–100x at sustained traffic.
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+  # Add a stable resource attribute so Tempo / Loki / Prometheus all
+  # tag rows with the same `deployment.environment`. Useful for the
+  # report screenshots where we want every panel to say "dev".
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: dev
+        action: upsert
+
+exporters:
+  # Traces → Tempo via OTLP/gRPC.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Logs → Loki via its native push API. (Loki doesn't speak OTLP
+  # natively in 3.2; the contrib collector translates OTLP logs into
+  # Loki streams.)
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+
+  # Metrics → Prometheus pull. The collector exposes /metrics on
+  # :8889; Prometheus scrapes it as a normal target.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    send_timestamps: true
+    metric_expiration: 5m
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Console exporter for collector-side debugging (kept in pipeline-
+  # less form so it's available via `extensions` if needed but not
+  # active by default).
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [loki]
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [prometheus]

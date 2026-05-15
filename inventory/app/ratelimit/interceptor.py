@@ -11,6 +11,10 @@ we log and allow the request through. The hard limit is enforced
 inside the Lua DECRBY in the inventory ReserveStock script
 (stock can never go negative regardless of how many requests get
 past this interceptor).
+
+Prometheus counters declared in :mod:`app.observability` are
+incremented here so the same dashboard panels work for both the
+edge (FastAPI middleware) and the service-to-service hop.
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ import logging
 
 import grpc
 
+from app.observability import RATE_LIMIT_ALLOWED, RATE_LIMIT_REJECTED
 from app.ratelimit.config import RULES, RateLimitRule
 from app.ratelimit.redis_backend import RedisBucketStore
 
@@ -84,6 +89,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
                 return await inner(request, context)
 
             if not result.allowed:
+                RATE_LIMIT_REJECTED.labels(rule=rule.name).inc()
                 await context.abort(
                     grpc.StatusCode.RESOURCE_EXHAUSTED,
                     (
@@ -92,6 +98,7 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
                     ),
                 )
 
+            RATE_LIMIT_ALLOWED.labels(rule=rule.name).inc()
             return await inner(request, context)
 
         return grpc.unary_unary_rpc_method_handler(

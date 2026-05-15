@@ -1,0 +1,49 @@
+# Tempo 2.6 — single-binary mode.
+#
+# Tempo accepts OTLP traces from the otel-collector, persists them
+# locally under /var/tempo, and serves the TraceQL search API on
+# port 3200 that Grafana queries. Retention is 24h — for coursework
+# we don't need historical data, and bounded storage keeps the dev
+# laptop happy.
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+# Single-binary mode runs distributor, ingester, querier, compactor
+# all in the same process listening on `target=all` (the default).
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Flush in-memory blocks aggressively so a search after a load
+  # test returns fresh traces without waiting for the default
+  # 30-minute idle period.
+  trace_idle_period: 10s
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+    pool:
+      max_workers: 100
+      queue_depth: 10000
+
+# Disable usage-stats reporting — saves an outbound connection that's
+# noise in offline dev.
+usage_report:
+  reporting_enabled: false

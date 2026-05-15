@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.clickhouse_client import close_clickhouse, init_clickhouse
 from app.config import get_settings
 from app.grpc_client import close_inventory_client, init_inventory_client
+from app.observability import setup_telemetry
 from app.ratelimit.redis_backend import RedisBucketStore
 from app.redis_client import close_redis, get_redis, init_redis
 from app.routers import admin_analytics as admin_analytics_router
@@ -88,6 +89,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Wire OpenTelemetry traces + Prometheus metrics. This must run AFTER
+# the FastAPI app and middleware are defined (FastAPIInstrumentor
+# attaches to the ASGI app) but BEFORE any request handlers fire.
+# Called here at module level so it runs once per worker process at
+# import time — uvicorn imports `app.main:app` exactly once per worker.
+setup_telemetry(app, service_name=os.getenv("OTEL_SERVICE_NAME", "api"))
 
 app.include_router(auth_router.router)
 app.include_router(products_router.router)

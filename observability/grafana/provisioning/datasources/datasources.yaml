@@ -1,0 +1,61 @@
+# Grafana datasource provisioning — Tempo + Loki + Prometheus all
+# wired together at boot so the operator doesn't have to click
+# through the UI to set them up.
+#
+# Trace ↔ logs correlation is on: when you click a span in Tempo,
+# the linked datasource (Loki, by uid) gets queried with the trace
+# ID so you can pivot from "this is the slow request" to "here are
+# the logs around it" without leaving Grafana.
+
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        # Click a span -> jump to Loki filtered by service + trace_id.
+        datasourceUid: loki
+        spanStartTimeShift: '-1h'
+        spanEndTimeShift: '1h'
+        tags:
+          - key: service.name
+            value: service_name
+        filterByTraceID: true
+        filterBySpanID: false
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      # Auto-detect trace_id in log lines and turn it into a clickable
+      # link back to Tempo. Matches what our LoggingInstrumentor
+      # injects (`trace_id=<hex>`).
+      derivedFields:
+        - name: TraceID
+          matcherRegex: 'trace_id=([0-9a-f]+)'
+          url: '$${__value.raw}'
+          datasourceUid: tempo
+
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s

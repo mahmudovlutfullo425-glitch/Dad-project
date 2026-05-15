@@ -1,0 +1,18 @@
+# Tells Grafana to pick up every dashboard JSON in
+# /var/lib/grafana/dashboards on boot. `allowUiUpdates: true` lets
+# you tweak panels in the UI during a demo, but the on-disk file
+# wins on every restart — so the canonical dashboard lives in git.
+
+apiVersion: 1
+
+providers:
+  - name: ecommerce
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

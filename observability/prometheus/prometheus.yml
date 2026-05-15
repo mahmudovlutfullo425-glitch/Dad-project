@@ -1,0 +1,45 @@
+# Prometheus 2.55 — scrape targets for the ecommerce stack.
+#
+# Two metric paths converge here:
+#
+# 1. The otel-collector exposes OTel-emitted metrics on :8889 (its
+#    Prometheus exporter). This is where SDK-emitted measurements
+#    from FastAPI/SQLAlchemy/gRPC auto-instrumentation surface.
+#
+# 2. The api and inventory services each run a sidecar
+#    `prometheus_client.start_http_server` on :9000 inside their
+#    container, exposing the hand-written counters we declare in
+#    `app/observability.py` — `rate_limit_rejected_total`,
+#    `stock_decrement_latency_seconds`, etc. These are NOT routed
+#    through the gateway: prometheus speaks to the service DNS name
+#    directly, so the metrics never appear on the public surface.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    deployment_environment: dev
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ['otel-collector:8889']
+
+  # api has `deploy.replicas: 2`. Docker compose exposes both replicas
+  # behind the same `api` DNS name; the round-robin resolver picks
+  # one per scrape. Each scrape sees the counters of whichever
+  # replica answered, so always wrap dashboard queries in
+  # `sum() by (job)` to recombine.
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['api:9000']
+
+  - job_name: inventory
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['inventory:9000']
