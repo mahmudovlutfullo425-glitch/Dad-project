@@ -53,10 +53,12 @@ make reindex               # push products into Meilisearch
 
 Then open:
 
-- **Storefront** — http://localhost
+- **Storefront** — http://localhost (Step 15; returns 502 until then)
 - **Swagger UI** — http://localhost/docs
 - **OpenAPI JSON** — http://localhost/openapi.json
 - **API health** — http://localhost/api/health
+- **Grafana** — http://localhost:3001 (anonymous Admin; pre-provisioned Tempo / Loki / Prometheus datasources and the "Flash-Sale Operations" dashboard)
+- **Prometheus** — http://localhost:9090 (raw query UI for the viva demo)
 
 Default admin (created by `make seed`): `admin@ecom.local` / `admin123`.
 Test users: `user1@ecom.local` … `user9@ecom.local` / `user1234`.
@@ -374,7 +376,12 @@ inventory/                  Inventory gRPC microservice
 
 gateway/                    Nginx config (2-replica LB, /api → api, / → frontend)
 frontend/                   Next.js storefront (Step 15)
-observability/              OTel + Grafana + Tempo + Loki + Prometheus configs (Step 12)
+observability/              OTel collector / Tempo / Loki / Prometheus / Grafana configs
+├── otel-collector/         OTLP ingress (traces+logs+metrics fan-out)
+├── tempo/                  Trace storage (24h retention)
+├── loki/                   Log storage (24h retention)
+├── prometheus/             Scrape config (api:9000, inventory:9000, otel-collector:8889)
+└── grafana/                Provisioned datasources + the Flash-Sale Operations dashboard
 scripts/
 ├── seed.py                 Deterministic data loader
 ├── reindex_products.py     Postgres → Meilisearch bulk index
