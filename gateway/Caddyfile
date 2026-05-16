@@ -1,0 +1,95 @@
+# Production gateway for the flash-sale stack.
+#
+# Caddy is used here instead of the dev-time Nginx gateway because it
+# obtains and renews Let's Encrypt certificates automatically — given a
+# real hostname that resolves to this droplet (e.g. nip.io), the first
+# request triggers an HTTP-01 challenge and serves HTTPS from then on.
+#
+# Wired up by docker-compose.yml's `gateway-prod` service under the
+# `prod` profile. The dev Nginx gateway (no TLS, only port 80) is in
+# the `dev` profile and never runs at the same time as this one.
+#
+# Hostname is read from the env at container start. .env on the droplet
+# must set PUBLIC_HOSTNAME=<droplet-ip>.nip.io (no scheme, no path).
+
+{
+    # Global options: set the ACME email so Let's Encrypt can reach the
+    # operator if a renewal fails. ADMIN_EMAIL is sourced from .env;
+    # falls back to a placeholder that still satisfies the ACME spec.
+    email {$ADMIN_EMAIL:admin@example.com}
+}
+
+# HTTP-only sibling for healthchecks and ACME challenges.
+#
+# Without this block, any request to http://127.0.0.1/gw-health from
+# the Docker healthcheck would be matched by the auto-HTTPS redirect
+# Caddy attaches to {$PUBLIC_HOSTNAME}, hit a 308 to https://<hostname>,
+# and then fail TLS verification (host mismatch on the loopback). By
+# binding /gw-health on plain HTTP for the loopback hosts only, we
+# keep the public auto-HTTPS behaviour intact while giving Docker a
+# reliable liveness probe.
+http://localhost, http://127.0.0.1 {
+    handle /gw-health {
+        respond "ok" 200
+    }
+}
+
+{$PUBLIC_HOSTNAME} {
+    # ---- Backend REST API ----
+    # handle_path strips the matching prefix before proxying — FastAPI
+    # is configured with root_path=/api so it expects unprefixed URLs
+    # internally but advertises the prefix in OpenAPI URLs.
+    handle_path /api/* {
+        reverse_proxy api:8000 {
+            header_up Host              {host}
+            header_up X-Real-IP         {remote_host}
+            header_up X-Forwarded-For   {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # ---- Swagger UI + OpenAPI JSON ----
+    # FastAPI serves these at the container root regardless of root_path
+    # (root_path only rewrites Try-it-out URLs to include /api).
+    handle /docs {
+        reverse_proxy api:8000
+    }
+    handle /redoc {
+        reverse_proxy api:8000
+    }
+    handle /openapi.json {
+        reverse_proxy api:8000
+    }
+
+    # ---- Gateway self-health (for uptime checks) ----
+    handle /gw-health {
+        respond "ok" 200
+    }
+
+    # ---- Next.js storefront (everything else) ----
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up Host              {host}
+            header_up X-Real-IP         {remote_host}
+            header_up X-Forwarded-For   {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Compress responses on the way out.
+    encode gzip zstd
+
+    # Sensible request size cap — flash-sale buy payloads are tiny, the
+    # only legitimate large upload is product images (admin only, future
+    # work). Cap at 10 MB to keep DOS surface small.
+    request_body {
+        max_size 10MB
+    }
+
+    # Access log via Caddy's structured JSON format. Container stdout is
+    # picked up by docker logs and (in dev) by the OTel collector.
+    log {
+        output stdout
+        format json
+    }
+}
