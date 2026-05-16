@@ -1,4 +1,5 @@
 .PHONY: help up down restart logs ps clean config \
+        up-prod down-prod restart-prod logs-prod ps-prod \
         build-api db-up db-migrate seed db-reset db-shell reindex \
         loadtest-flashsale \
         k6-product-detail-baseline k6-product-detail-cached \
@@ -8,7 +9,15 @@
         frontend-build frontend-logs frontend-dev
 
 # ---- internal helpers (not in .PHONY) ----
-COMPOSE := docker compose --env-file .env
+# Two compose invocations: one for dev (plaintext Nginx gateway on :80)
+# and one for prod (Caddy gateway with auto-TLS on :80/:443). Both share
+# the same base file; the difference is which gateway service is
+# activated by the profile.
+COMPOSE := docker compose --env-file .env --profile dev
+COMPOSE_PROD := docker compose --env-file .env --profile prod
+# Bare compose (no profile) for targets that don't need a gateway and
+# would otherwise spawn the dev nginx as a side effect.
+COMPOSE_BARE := docker compose --env-file .env
 K6_NETWORK := ecommerce-flashsale_ecom-net
 K6_IMAGE := grafana/k6:0.54.0
 K6_OUTPUT_DIR := docs/measurements/runs
@@ -22,7 +31,7 @@ K6_RUN_DOCKER = docker run --rm -i \
 help:
 	@echo "Available targets:"
 	@echo ""
-	@echo "  Stack:"
+	@echo "  Stack (dev — Nginx gateway, plaintext :80):"
 	@echo "    make up         - Bring up the full stack"
 	@echo "    make down       - Stop the stack"
 	@echo "    make restart    - Restart the stack"
@@ -30,6 +39,13 @@ help:
 	@echo "    make ps         - Show running services"
 	@echo "    make config     - Validate docker-compose configuration"
 	@echo "    make clean      - Stop stack and remove all volumes (destructive)"
+	@echo ""
+	@echo "  Stack (prod — Caddy gateway with Let's Encrypt on :80/:443, Step 16):"
+	@echo "    make up-prod    - Bring up the full stack with auto-TLS"
+	@echo "    make down-prod  - Stop the prod stack (keeps caddy_data / certs)"
+	@echo "    make restart-prod - Restart the prod stack"
+	@echo "    make logs-prod  - Tail logs from all prod services"
+	@echo "    make ps-prod    - Show running prod services"
 	@echo ""
 	@echo "  Database:"
 	@echo "    make build-api  - Build the api image"
@@ -76,6 +92,33 @@ config:
 
 clean:
 	$(COMPOSE) down -v
+
+# ============================================================
+# Production stack (Step 16) — Caddy gateway with auto-TLS.
+# Requires PUBLIC_HOSTNAME to be set in .env (e.g. <ip>.nip.io)
+# and the host's :80 / :443 to be reachable from the Internet so
+# Caddy can complete the HTTP-01 ACME challenge.
+# ============================================================
+
+up-prod:
+	@if grep -q '^PUBLIC_HOSTNAME=your-droplet-ip.nip.io' .env 2>/dev/null; then \
+		echo "ERROR: PUBLIC_HOSTNAME in .env is still the placeholder."; \
+		echo "       Edit .env and set PUBLIC_HOSTNAME=<your-droplet-ip>.nip.io"; \
+		exit 1; \
+	fi
+	$(COMPOSE_PROD) up -d
+
+down-prod:
+	$(COMPOSE_PROD) down
+
+restart-prod:
+	$(COMPOSE_PROD) restart
+
+logs-prod:
+	$(COMPOSE_PROD) logs -f --tail=100
+
+ps-prod:
+	$(COMPOSE_PROD) ps
 
 build-api:
 	$(COMPOSE) build api
