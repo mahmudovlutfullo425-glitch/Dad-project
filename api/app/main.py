@@ -16,7 +16,10 @@ from app.grpc_client import close_inventory_client, init_inventory_client
 from app.observability import setup_telemetry
 from app.ratelimit.redis_backend import RedisBucketStore
 from app.redis_client import close_redis, get_redis, init_redis
+from app.routers import addresses as addresses_router
 from app.routers import admin_analytics as admin_analytics_router
+from app.routers import admin_inventory as admin_inventory_router
+from app.routers import admin_orders as admin_orders_router
 from app.routers import auth as auth_router
 from app.routers import cart as cart_router
 from app.routers import checkout as checkout_router
@@ -103,8 +106,11 @@ app.include_router(cart_router.router)
 app.include_router(search_router.router)
 app.include_router(checkout_router.router)
 app.include_router(orders_router.router)
+app.include_router(addresses_router.router)
 app.include_router(flashsales_router.router)
 app.include_router(admin_analytics_router.router)
+app.include_router(admin_orders_router.router)
+app.include_router(admin_inventory_router.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness probe")
