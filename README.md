@@ -298,6 +298,27 @@ make db-reset          # destroy pg volume and rebuild from seed (DESTRUCTIVE)
 make reindex           # rebuild the Meilisearch `products` index from Postgres
 ```
 
+### Load tests (R6 measurements)
+
+The three R6 before/after comparisons (product cache, search, flash-sale
+stock decrement) are driven by k6 scripts in [`scripts/loadtest/`](scripts/loadtest/),
+with results landing in [`docs/measurements/runs/`](docs/measurements/runs/).
+Methodology and the results table live in [`docs/measurements/README.md`](docs/measurements/README.md).
+
+```bash
+make loadtest-flashsale            # create/refresh an active flash sale for k6
+make k6-product-detail-baseline    # cache OFF (one-off restart of api)
+make k6-product-detail-cached      # cache ON
+make k6-search-compare             # ILIKE vs Meilisearch, sequential
+make k6-flash-sale-postgres        # SELECT ... FOR UPDATE
+make k6-flash-sale-redis           # Redis Lua DECRBY
+make k6-all                        # run every measurement back-to-back
+```
+
+The targets flip `PRODUCT_CACHE_ENABLED`, `USE_POSTGRES_STOCK`, and
+`RATE_LIMIT_ENABLED` for the duration of the run and restore production
+defaults afterwards.
+
 ### Inspect the data tier directly
 
 ```bash

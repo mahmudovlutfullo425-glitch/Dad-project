@@ -1,0 +1,6 @@
+# k6 run outputs live here — locally generated, not committed. The
+# numbers that go into the report are transcribed into ../README.md
+# (and the design report) by hand.
+*.json
+*.log
+!.gitignore
