@@ -7,8 +7,13 @@ body {
   height: 100%;
 }
 
+/* Sticky-footer layout: body is a flex column at viewport height,
+ * <main> takes the remaining space so the footer always sits at the
+ * bottom of the viewport when content is short, and flows naturally
+ * below long content otherwise.
+ */
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  @apply bg-slate-50 text-slate-900 antialiased flex flex-col min-h-screen;
 }
 
 a {
@@ -16,7 +21,7 @@ a {
 }
 
 main {
-  @apply mx-auto w-full max-w-7xl px-4 py-6;
+  @apply mx-auto w-full max-w-7xl flex-1 px-4 py-6;
 }
 
 .btn {
