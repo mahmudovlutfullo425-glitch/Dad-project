@@ -16,9 +16,9 @@ httpx==0.27.2
 celery==5.4.0
 faker==30.8.2
 meilisearch-python-sdk==7.1.5
-grpcio==1.66.2
-grpcio-tools==1.66.2
-protobuf==5.28.2
+grpcio==1.62.3
+grpcio-tools==1.62.3
+protobuf==4.25.5
 prometheus-client==0.21.0
 clickhouse-connect==0.8.7
 # ---- OpenTelemetry (Step 12) ----
