@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+a {
+  @apply text-brand hover:text-brand-dark;
+}
+
+main {
+  @apply mx-auto w-full max-w-7xl px-4 py-6;
+}
+
+.btn {
+  @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition;
+}
+
+.btn-primary {
+  @apply btn bg-brand text-white hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.btn-secondary {
+  @apply btn border border-slate-300 bg-white text-slate-700 hover:bg-slate-100;
+}
+
+.card {
+  @apply rounded-lg border border-slate-200 bg-white shadow-sm;
+}
+
+.tag {
+  @apply inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700;
+}
