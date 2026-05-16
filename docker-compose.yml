@@ -61,6 +61,12 @@ services:
       # Public mount point behind the gateway. Surfaces in OpenAPI so
       # Swagger UI's "Try it out" requests include the /api/ prefix.
       - API_ROOT_PATH=/api
+      # Step 13 / R6 measurement knobs. Defaults match production
+      # behaviour; the loadtest Make targets restart the service with
+      # these flipped to record the "before" baselines.
+      - PRODUCT_CACHE_ENABLED=${PRODUCT_CACHE_ENABLED:-true}
+      - PRODUCT_CACHE_TTL_SECONDS=${PRODUCT_CACHE_TTL_SECONDS:-300}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status==200 else 1)"]
       interval: 10s
@@ -101,6 +107,11 @@ services:
       - INVENTORY_GRPC_PORT=${INVENTORY_GRPC_PORT}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}
       - OTEL_SERVICE_NAME=inventory
+      # Step 13 / R6 measurement knobs. USE_POSTGRES_STOCK swaps the
+      # ReserveStock hot path from Lua-DECRBY to SELECT ... FOR UPDATE
+      # so the load-test runner can compare both implementations.
+      - USE_POSTGRES_STOCK=${USE_POSTGRES_STOCK:-false}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
     expose:
       - "50051"
       # Prometheus metrics sidecar (started by app.observability).
