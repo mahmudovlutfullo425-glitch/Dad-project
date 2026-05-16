@@ -1,14 +1,18 @@
 """Product catalog and category endpoints."""
+import logging
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from redis.asyncio import Redis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_admin
 from app.models import Category, Product, ProductVariant, User
+from app.redis_client import get_redis
 from app.schemas.product import (
     CategoryOut,
     ProductCreate,
@@ -18,7 +22,12 @@ from app.schemas.product import (
 )
 from app.search_client import SearchClient, build_search_doc, get_search
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["products"])
+
+
+def _product_cache_key(product_id: int) -> str:
+    return f"hot:product:{product_id}"
 
 
 def _product_query():
@@ -83,6 +92,15 @@ async def list_products(
     min_price: Decimal | None = Query(None, ge=0),
     max_price: Decimal | None = Query(None, ge=0),
     is_active: bool | None = None,
+    name_like: str | None = Query(
+        None,
+        description=(
+            "Case-insensitive substring match on product name (Postgres ILIKE). "
+            "Intentionally naive — present as the R6 baseline against /search/products "
+            "(Meilisearch). Prefer /search/products for production search UX."
+        ),
+        max_length=100,
+    ),
 ) -> ProductList:
     stmt = _product_query()
     count_stmt = select(func.count(Product.id))
@@ -102,6 +120,14 @@ async def list_products(
     if is_active is not None:
         stmt = stmt.where(Product.is_active == is_active)
         count_stmt = count_stmt.where(Product.is_active == is_active)
+    if name_like:
+        # Wildcards in the pattern itself — bound parameter still safe
+        # against injection, just inefficient (no index on name; full
+        # scan of products). That's the point: this is the "before"
+        # in the R6 search comparison.
+        pattern = f"%{name_like}%"
+        stmt = stmt.where(Product.name.ilike(pattern))
+        count_stmt = count_stmt.where(Product.name.ilike(pattern))
 
     total = await db.scalar(count_stmt) or 0
     stmt = stmt.order_by(Product.id).offset((page - 1) * page_size).limit(page_size)
@@ -120,11 +146,55 @@ async def list_products(
     response_model=ProductOut,
     summary="Fetch a single product by id",
 )
-async def get_product(product_id: int, db: AsyncSession = Depends(get_db)) -> ProductOut:
+async def get_product(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> ProductOut:
+    """Single-product detail with optional Redis hot-cache.
+
+    Cache key ``hot:product:{id}`` holds the serialised ProductOut JSON
+    with TTL ``PRODUCT_CACHE_TTL_SECONDS``. Writes (PATCH / DELETE)
+    invalidate the key explicitly so a stale entry can't outlive its
+    underlying row.
+
+    Cache is bypassed entirely when ``PRODUCT_CACHE_ENABLED=false``.
+    That flag exists so the R6 measurement runs can record an honest
+    "no-cache baseline" without leaving any debug hatches (header
+    overrides, query params) in the production code path.
+    """
+    settings = get_settings()
+    cache_key = _product_cache_key(product_id)
+
+    if settings.product_cache_enabled:
+        try:
+            cached = await redis.get(cache_key)
+        except Exception as exc:
+            # Fail-open on Redis: serve from Postgres rather than 500
+            # if the cache layer is unreachable. Matches the rate
+            # limiter's posture.
+            logger.warning("product cache GET failed for id=%s: %s", product_id, exc)
+            cached = None
+        if cached is not None:
+            return ProductOut.model_validate_json(cached)
+
     product = await db.scalar(_product_query().where(Product.id == product_id))
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
-    return ProductOut.model_validate(product)
+
+    out = ProductOut.model_validate(product)
+
+    if settings.product_cache_enabled:
+        try:
+            await redis.set(
+                cache_key,
+                out.model_dump_json(),
+                ex=settings.product_cache_ttl_seconds,
+            )
+        except Exception as exc:
+            logger.warning("product cache SET failed for id=%s: %s", product_id, exc)
+
+    return out
 
 
 # --- Products: write (admin only) ---
@@ -178,6 +248,21 @@ async def create_product(
     return ProductOut.model_validate(fresh)
 
 
+async def _invalidate_product_cache(redis: Redis, product_id: int) -> None:
+    """Best-effort cache eviction; never raise.
+
+    Writes (PATCH/DELETE) call this so the next read goes back to
+    Postgres for the fresh value. If Redis is down the eviction silently
+    no-ops — the entry will expire on its own TTL and the read path is
+    fail-open anyway."""
+    try:
+        await redis.delete(_product_cache_key(product_id))
+    except Exception as exc:
+        logger.warning(
+            "product cache invalidation failed for id=%s: %s", product_id, exc
+        )
+
+
 @router.patch(
     "/products/{product_id}",
     response_model=ProductOut,
@@ -188,6 +273,7 @@ async def update_product(
     payload: ProductUpdate,
     db: AsyncSession = Depends(get_db),
     search: SearchClient = Depends(get_search),
+    redis: Redis = Depends(get_redis),
     _: User = Depends(get_current_admin),
 ) -> ProductOut:
     product = await db.get(Product, product_id)
@@ -210,6 +296,7 @@ async def update_product(
 
     fresh = await db.scalar(_product_query().where(Product.id == product.id))
     await _sync_to_search(product.id, db, search)
+    await _invalidate_product_cache(redis, product_id)
     return ProductOut.model_validate(fresh)
 
 
@@ -222,6 +309,7 @@ async def delete_product(
     product_id: int,
     db: AsyncSession = Depends(get_db),
     search: SearchClient = Depends(get_search),
+    redis: Redis = Depends(get_redis),
     _: User = Depends(get_current_admin),
 ) -> Response:
     product = await db.get(Product, product_id)
@@ -231,4 +319,5 @@ async def delete_product(
     await db.commit()
     # _sync_to_search sees is_active=False and removes it from the index.
     await _sync_to_search(product_id, db, search)
+    await _invalidate_product_cache(redis, product_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

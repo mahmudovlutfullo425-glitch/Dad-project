@@ -41,6 +41,23 @@ class Settings(BaseSettings):
     # CORS — comma-separated list of allowed origins, "*" for any
     cors_allow_origins: str = "*"
 
+    # ---- Step 13 / R6 measurement knobs ----
+    # Toggling these between load-test runs lets us measure the
+    # contribution of each optimisation without code changes.
+    #
+    # PRODUCT_CACHE_ENABLED: when false, /products/{id} always hits
+    # Postgres. Lets us record the "before caching" baseline for the
+    # R6 product-detail comparison.
+    product_cache_enabled: bool = True
+    product_cache_ttl_seconds: int = 300
+
+    # RATE_LIMIT_ENABLED: when false, the FastAPI rate-limit dependency
+    # and the inventory gRPC interceptor short-circuit. Production
+    # default is true; flip it off only for measurement runs where the
+    # bottleneck under test is the stock decrement or cache, not the
+    # rate limiter.
+    rate_limit_enabled: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

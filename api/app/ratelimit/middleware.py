@@ -32,12 +32,20 @@ from typing import Callable
 from fastapi import Depends, HTTPException, Request, status
 from prometheus_client import Counter
 
+from app.config import get_settings
 from app.deps import get_current_user
 from app.models import User
 from app.ratelimit.config import RULES, RateLimitRule, Scope
 from app.ratelimit.redis_backend import RedisBucketStore
 
 logger = logging.getLogger(__name__)
+
+
+rate_limit_bypassed_total = Counter(
+    "rate_limit_bypassed_total",
+    "Rate-limit checks skipped because RATE_LIMIT_ENABLED=false.",
+    ["rule"],
+)
 
 
 rate_limit_allowed_total = Counter(
@@ -123,6 +131,9 @@ def rate_limit(rule_name: str) -> Callable:
             request: Request,
             user: User = Depends(get_current_user),
         ) -> None:
+            if not get_settings().rate_limit_enabled:
+                rate_limit_bypassed_total.labels(rule=rule.name).inc()
+                return
             store = _get_store(request)
             key = rule.key_for(str(user.id))
             try:
@@ -140,6 +151,9 @@ def rate_limit(rule_name: str) -> Callable:
     if rule.scope == Scope.IP:
 
         async def _check_ip(request: Request) -> None:
+            if not get_settings().rate_limit_enabled:
+                rate_limit_bypassed_total.labels(rule=rule.name).inc()
+                return
             store = _get_store(request)
             key = rule.key_for(_client_ip(request))
             try:
@@ -156,6 +170,9 @@ def rate_limit(rule_name: str) -> Callable:
 
     # Scope.GLOBAL
     async def _check_global(request: Request) -> None:
+        if not get_settings().rate_limit_enabled:
+            rate_limit_bypassed_total.labels(rule=rule.name).inc()
+            return
         store = _get_store(request)
         key = rule.key_for(None)
         try:
