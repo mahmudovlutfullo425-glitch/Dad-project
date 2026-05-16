@@ -21,6 +21,21 @@ class Settings(BaseSettings):
     # gRPC listener
     inventory_grpc_port: int = 50051
 
+    # ---- Step 13 / R6 measurement knobs ----
+    # USE_POSTGRES_STOCK: when true, ReserveStock locks
+    # ``inventory_levels`` rows with SELECT ... FOR UPDATE and mutates
+    # ``quantity_reserved`` durably instead of going through Redis Lua.
+    # CommitReservation / ReleaseReservation follow suit. Production
+    # default is false — the Redis path is faster and uses Postgres
+    # only for reconciliation on commit.
+    use_postgres_stock: bool = False
+
+    # RATE_LIMIT_ENABLED: when false the gRPC interceptor short-circuits.
+    # Mirrors the api-side flag — flip both off for the flash-sale
+    # comparison so we measure stock-decrement contention, not bucket
+    # rejections.
+    rate_limit_enabled: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

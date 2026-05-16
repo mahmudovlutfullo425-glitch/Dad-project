@@ -22,6 +22,7 @@ import logging
 
 import grpc
 
+from app.config import get_settings
 from app.observability import RATE_LIMIT_ALLOWED, RATE_LIMIT_REJECTED
 from app.ratelimit.config import RULES, RateLimitRule
 from app.ratelimit.redis_backend import RedisBucketStore
@@ -65,6 +66,12 @@ class RateLimitInterceptor(grpc.aio.ServerInterceptor):
         inner = handler.unary_unary
 
         async def wrapped(request, context: grpc.aio.ServicerContext):
+            # Short-circuit when measurement runs disable the limiter.
+            # Re-checked per request so an env flip takes effect on
+            # the next call without needing to recreate handlers.
+            if not get_settings().rate_limit_enabled:
+                return await inner(request, context)
+
             user_id = getattr(request, "user_id", 0) or 0
             # Namespace the bucket with "grpc:" so this internal-hop
             # rate limit doesn't share a counter with the api-edge
