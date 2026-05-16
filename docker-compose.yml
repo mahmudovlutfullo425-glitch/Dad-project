@@ -1,11 +1,16 @@
 name: ecommerce-flashsale
 
 services:
-  # ---------------- Gateway ----------------
+  # ---------------- Gateway (dev: nginx, plaintext :80) ----------------
+  # Step 16 added the `dev` profile so this service only starts when the
+  # local Makefile (`make up`) invokes compose with --profile dev. The
+  # production Caddy gateway below uses the `prod` profile so the two
+  # can't fight over ports 80/443 on the same host.
   gateway:
     build:
       context: ./gateway
     container_name: ecom-gateway
+    profiles: ["dev"]
     ports:
       - "${GATEWAY_HTTP_PORT:-80}:80"
       - "${GATEWAY_HTTPS_PORT:-443}:443"
@@ -23,6 +28,44 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    restart: unless-stopped
+
+  # ---------------- Gateway (prod: Caddy, auto-TLS :80 + :443) ----------------
+  # Step 16. Caddy obtains and renews a Let's Encrypt certificate for
+  # ${PUBLIC_HOSTNAME} automatically (HTTP-01 challenge on :80 → cert
+  # served on :443). Volumes preserve the cert and ACME account across
+  # container restarts so we don't hit Let's Encrypt rate limits during
+  # demos. Only runs when invoked with --profile prod.
+  gateway-prod:
+    image: caddy:2.8-alpine
+    container_name: ecom-gateway-prod
+    profiles: ["prod"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    networks:
+      - ecom-net
+    healthcheck:
+      # wget on busybox/alpine inside caddy:2.8-alpine. The HTTP-only
+      # site block in the Caddyfile binds /gw-health on the loopback
+      # so this probe doesn't get caught by auto-HTTPS redirect.
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/gw-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
   # ---------------- Backend API (x2 replicas behind gateway) ----------------
@@ -424,6 +467,13 @@ volumes:
   tempo_data:
   loki_data:
   prom_data:
+  # Step 16: Caddy persists its issued Let's Encrypt cert and the ACME
+  # account in /data, and its compiled config in /config. Keeping these
+  # in named volumes avoids burning the Let's Encrypt rate limit
+  # (5 duplicate certs per week, 50 new orders per account per 3h) on
+  # every `docker compose down`.
+  caddy_data:
+  caddy_config:
 
 # ---------------- Networks ----------------
 networks:
