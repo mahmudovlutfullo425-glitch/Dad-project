@@ -202,6 +202,11 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        # Flip to "false" via the host env var when building behind a
+        # corporate TLS-inspection proxy (Fortinet / Zscaler / etc.)
+        # so npm doesn't reject the rewritten registry cert. Default
+        # "true" keeps strict TLS on for production builds.
+        NPM_STRICT_SSL: ${NPM_STRICT_SSL:-true}
     container_name: ecom-frontend
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
