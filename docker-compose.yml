@@ -192,17 +192,28 @@ services:
       - ecom-net
     restart: unless-stopped
 
-  # ---------------- Frontend ----------------
-  # Opt-in via `--profile frontend` until Step 15 ships the Next.js
-  # app. The directory currently only contains a .gitkeep placeholder,
-  # so `docker compose up` would otherwise fail on a missing Dockerfile.
-  # Enable later with: docker compose --profile frontend up -d
+  # ---------------- Frontend (Next.js 14 storefront + admin) ----------------
+  # Step 15: brought online by default. Routed at `/` by the gateway;
+  # the api remains under `/api/*`. NEXT_PUBLIC_API_URL is baked into
+  # the browser bundle at build time, INTERNAL_API_URL is read at
+  # runtime by RSC pages (which short-circuit the gateway hop).
   frontend:
-    profiles: ["frontend"]
     build:
       context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    container_name: ecom-frontend
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+      - INTERNAL_API_URL=http://api:8000
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - ecom-net
     restart: unless-stopped

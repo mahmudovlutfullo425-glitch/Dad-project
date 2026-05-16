@@ -4,7 +4,8 @@
         k6-product-detail-baseline k6-product-detail-cached \
         k6-search-compare \
         k6-flash-sale-redis k6-flash-sale-postgres \
-        k6-all
+        k6-all \
+        frontend-build frontend-logs frontend-dev
 
 # ---- internal helpers (not in .PHONY) ----
 COMPOSE := docker compose --env-file .env
@@ -49,6 +50,11 @@ help:
 	@echo "    make k6-flash-sale-redis         - Flash-sale buy with Redis Lua DECRBY (default)"
 	@echo "    make k6-flash-sale-postgres      - Flash-sale buy with Postgres SELECT FOR UPDATE"
 	@echo "    make k6-all                      - Run every measurement back-to-back"
+	@echo ""
+	@echo "  Frontend (Next.js storefront + admin):"
+	@echo "    make frontend-build              - Build the frontend Docker image"
+	@echo "    make frontend-logs               - Tail frontend logs"
+	@echo "    make frontend-dev                - Local Next.js dev server (npm install + dev)"
 
 up:
 	$(COMPOSE) up -d
@@ -179,3 +185,19 @@ k6-all: k6-product-detail-baseline k6-product-detail-cached k6-search-compare \
         k6-flash-sale-postgres k6-flash-sale-redis
 	@echo ""
 	@echo "All R6 measurements complete. Summaries in $(K6_OUTPUT_DIR)/."
+
+# ============================================================
+# Frontend (Step 15)
+# ============================================================
+
+frontend-build:
+	$(COMPOSE) build frontend
+
+frontend-logs:
+	$(COMPOSE) logs -f --tail=100 frontend
+
+# Local hot-reload dev server. Points at the gateway so the api / Meili
+# / inventory still come from the compose stack — only the Next.js
+# layer runs natively. Requires node 20+.
+frontend-dev:
+	cd frontend && npm install && NEXT_PUBLIC_API_URL=http://localhost/api INTERNAL_API_URL=http://localhost/api npm run dev

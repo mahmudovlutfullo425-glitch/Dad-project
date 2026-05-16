@@ -53,7 +53,7 @@ make reindex               # push products into Meilisearch
 
 Then open:
 
-- **Storefront** — http://localhost (Step 15; returns 502 until then)
+- **Storefront** — http://localhost (Next.js storefront + admin; see [`frontend/README.md`](frontend/README.md))
 - **Swagger UI** — http://localhost/docs
 - **OpenAPI JSON** — http://localhost/openapi.json
 - **API health** — http://localhost/api/health
@@ -298,6 +298,21 @@ make db-reset          # destroy pg volume and rebuild from seed (DESTRUCTIVE)
 make reindex           # rebuild the Meilisearch `products` index from Postgres
 ```
 
+### Frontend (Next.js storefront + admin)
+
+The storefront + admin UI lives in [`frontend/`](frontend/) and is
+served at `http://localhost/` by the gateway. Full setup notes in
+[`frontend/README.md`](frontend/README.md). Quick refs:
+
+```bash
+make frontend-build    # rebuild only the frontend image
+make frontend-logs     # tail the running container
+make frontend-dev      # local Next.js dev server (faster HMR; needs node 20+)
+```
+
+Demo accounts: `user1@ecom.local` / `user1234` (customer) ·
+`admin@ecom.local` / `admin123` (admin section).
+
 ### Load tests (R6 measurements)
 
 The three R6 before/after comparisons (product cache, search, flash-sale
@@ -396,7 +411,11 @@ inventory/                  Inventory gRPC microservice
 └── Dockerfile
 
 gateway/                    Nginx config (2-replica LB, /api → api, / → frontend)
-frontend/                   Next.js storefront (Step 15)
+frontend/                   Next.js 14 storefront + admin (App Router, Tailwind, SWR)
+├── app/                    Pages (RSC for public, client for auth-gated)
+├── components/             Navbar, ProductCard, AddToCartButton, FlashSaleCountdown, ...
+├── lib/                    api.ts (browser fetch), server-fetch.ts (RSC), auth.tsx, types.ts
+└── Dockerfile              Multi-stage: builder → standalone runner (~150 MB)
 observability/              OTel collector / Tempo / Loki / Prometheus / Grafana configs
 ├── otel-collector/         OTLP ingress (traces+logs+metrics fan-out)
 ├── tempo/                  Trace storage (24h retention)
