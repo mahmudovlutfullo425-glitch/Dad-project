@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_DailySettlement"
+                  targetNamespace="http://flashsale.ecom/bpmn">
+  <bpmn:process id="Process_DailySettlement" name="Daily settlement (Celery Beat / 03:00 UTC)" isExecutable="false">
+
+    <bpmn:startEvent id="TimerStart_Daily" name="Daily at 03:00 UTC&#10;(Celery Beat)">
+      <bpmn:outgoing>Flow_Start_Window</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="Timer_Daily">
+        <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R/2026-05-17T03:00:00Z/P1D</bpmn:timeCycle>
+      </bpmn:timerEventDefinition>
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="ServiceTask_ComputeWindow" name="compute window&#10;[yesterday 00:00, today 00:00)">
+      <bpmn:incoming>Flow_Start_Window</bpmn:incoming>
+      <bpmn:outgoing>Flow_Window_Query</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Query" name="SELECT status,&#10;COUNT(id), SUM(total)&#10;GROUP BY status&#10;WHERE placed_at &#8712; window">
+      <bpmn:incoming>Flow_Window_Query</bpmn:incoming>
+      <bpmn:outgoing>Flow_Query_Build</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Build" name="build payload&#10;{by_status, totals,&#10;window_start, window_end}">
+      <bpmn:incoming>Flow_Query_Build</bpmn:incoming>
+      <bpmn:outgoing>Flow_Build_Audit</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Audit" name="INSERT audit_log&#10;action='settlement.daily'&#10;entity_id=yesterday">
+      <bpmn:incoming>Flow_Build_Audit</bpmn:incoming>
+      <bpmn:outgoing>Flow_Audit_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Done" name="Settled&#10;(returns date, count, revenue)">
+      <bpmn:incoming>Flow_Audit_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:textAnnotation id="TextAnnotation_ChNote">
+      <bpmn:text>ClickHouse time-series rollup of this row is a planned hook — once wired, the same payload is written to an `order_rollup_daily` table for Grafana to chart.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_ChNote" sourceRef="ServiceTask_Audit" targetRef="TextAnnotation_ChNote"/>
+
+    <bpmn:sequenceFlow id="Flow_Start_Window" sourceRef="TimerStart_Daily" targetRef="ServiceTask_ComputeWindow"/>
+    <bpmn:sequenceFlow id="Flow_Window_Query" sourceRef="ServiceTask_ComputeWindow" targetRef="ServiceTask_Query"/>
+    <bpmn:sequenceFlow id="Flow_Query_Build" sourceRef="ServiceTask_Query" targetRef="ServiceTask_Build"/>
+    <bpmn:sequenceFlow id="Flow_Build_Audit" sourceRef="ServiceTask_Build" targetRef="ServiceTask_Audit"/>
+    <bpmn:sequenceFlow id="Flow_Audit_End" sourceRef="ServiceTask_Audit" targetRef="EndEvent_Done"/>
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_DailySettlement">
+
+      <bpmndi:BPMNShape id="TimerStart_Daily_di" bpmnElement="TimerStart_Daily">
+        <dc:Bounds x="160" y="142" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="130" y="185" width="100" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_ComputeWindow_di" bpmnElement="ServiceTask_ComputeWindow">
+        <dc:Bounds x="240" y="120" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Query_di" bpmnElement="ServiceTask_Query">
+        <dc:Bounds x="460" y="120" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Build_di" bpmnElement="ServiceTask_Build">
+        <dc:Bounds x="700" y="120" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Audit_di" bpmnElement="ServiceTask_Audit">
+        <dc:Bounds x="940" y="120" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Done_di" bpmnElement="EndEvent_Done">
+        <dc:Bounds x="1180" y="142" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="1150" y="185" width="100" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="TextAnnotation_ChNote_di" bpmnElement="TextAnnotation_ChNote">
+        <dc:Bounds x="940" y="260" width="280" height="80"/>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="Flow_Start_Window_di" bpmnElement="Flow_Start_Window">
+        <di:waypoint x="196" y="160"/>
+        <di:waypoint x="240" y="160"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Window_Query_di" bpmnElement="Flow_Window_Query">
+        <di:waypoint x="420" y="160"/>
+        <di:waypoint x="460" y="160"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Query_Build_di" bpmnElement="Flow_Query_Build">
+        <di:waypoint x="660" y="160"/>
+        <di:waypoint x="700" y="160"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Build_Audit_di" bpmnElement="Flow_Build_Audit">
+        <di:waypoint x="900" y="160"/>
+        <di:waypoint x="940" y="160"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Audit_End_di" bpmnElement="Flow_Audit_End">
+        <di:waypoint x="1140" y="160"/>
+        <di:waypoint x="1180" y="160"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_ChNote_di" bpmnElement="Association_ChNote">
+        <di:waypoint x="1040" y="200"/>
+        <di:waypoint x="1040" y="260"/>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

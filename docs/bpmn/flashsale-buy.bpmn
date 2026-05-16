@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_FlashsaleBuy"
+                  targetNamespace="http://flashsale.ecom/bpmn">
+  <bpmn:process id="Process_FlashsaleBuy" name="Flash-sale fast-buy request" isExecutable="false">
+
+    <bpmn:startEvent id="StartEvent_Request" name="POST /flashsales/{id}/buy">
+      <bpmn:outgoing>Flow_Request_RateLimit</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <!-- Gate 1: token-bucket rate limit (FLASH_BUY_PER_USER, capacity=3) -->
+    <bpmn:exclusiveGateway id="Gateway_RateLimit" name="Token bucket&#10;has tokens?">
+      <bpmn:incoming>Flow_Request_RateLimit</bpmn:incoming>
+      <bpmn:outgoing>Flow_RateLimit_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_RateLimit_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:endEvent id="EndEvent_429" name="429 Too Many Requests&#10;Retry-After">
+      <bpmn:incoming>Flow_RateLimit_No</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Gate 2: time-window check (starts_at <= now <= ends_at) -->
+    <bpmn:exclusiveGateway id="Gateway_Active" name="Sale window&#10;active?">
+      <bpmn:incoming>Flow_RateLimit_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_Active_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Active_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_EmitNotActive" name="emit ClickHouse&#10;rejected/sale_not_active">
+      <bpmn:incoming>Flow_Active_No</bpmn:incoming>
+      <bpmn:outgoing>Flow_EmitNotActive_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_400_NotActive" name="400 sale not active">
+      <bpmn:incoming>Flow_EmitNotActive_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Per-user counter INCR -->
+    <bpmn:serviceTask id="ServiceTask_INCR" name="INCRBY fs_purchased&#10;:{fsid}:{uid}">
+      <bpmn:incoming>Flow_Active_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_INCR_PerUserGW</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <!-- Gate 3: per-user limit -->
+    <bpmn:exclusiveGateway id="Gateway_PerUser" name="new_total &#8804;&#10;per_user_limit?">
+      <bpmn:incoming>Flow_INCR_PerUserGW</bpmn:incoming>
+      <bpmn:outgoing>Flow_PerUser_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_PerUser_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_DecPerUser" name="DECRBY counter&#10;(refund the INCR)">
+      <bpmn:incoming>Flow_PerUser_No</bpmn:incoming>
+      <bpmn:outgoing>Flow_DecPerUser_Emit</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_EmitPerUser" name="emit ClickHouse&#10;rejected/per_user_limit_reached">
+      <bpmn:incoming>Flow_DecPerUser_Emit</bpmn:incoming>
+      <bpmn:outgoing>Flow_EmitPerUser_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_400_PerUser" name="400 per-user limit">
+      <bpmn:incoming>Flow_EmitPerUser_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- gRPC ReserveStock -->
+    <bpmn:serviceTask id="ServiceTask_Reserve" name="gRPC ReserveStock&#10;(idem_key)">
+      <bpmn:incoming>Flow_PerUser_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_Reserve_StockGW</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <!-- Gate 4: stock sufficient? -->
+    <bpmn:exclusiveGateway id="Gateway_Stock" name="reserve.success?">
+      <bpmn:incoming>Flow_Reserve_StockGW</bpmn:incoming>
+      <bpmn:outgoing>Flow_Stock_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Stock_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_DecStock" name="DECRBY counter&#10;(refund the INCR)">
+      <bpmn:incoming>Flow_Stock_No</bpmn:incoming>
+      <bpmn:outgoing>Flow_DecStock_Emit</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_EmitStock" name="emit ClickHouse&#10;rejected/stock_insufficient">
+      <bpmn:incoming>Flow_DecStock_Emit</bpmn:incoming>
+      <bpmn:outgoing>Flow_EmitStock_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_409" name="409 stock insufficient">
+      <bpmn:incoming>Flow_EmitStock_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Happy path: persist + enqueue + analytics -->
+    <bpmn:serviceTask id="ServiceTask_Persist" name="INSERT Order +&#10;OrderItem + Payment&#10;(status=pending)">
+      <bpmn:incoming>Flow_Stock_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_Persist_Enqueue</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Enqueue" name="enqueue&#10;process_order.chain()">
+      <bpmn:incoming>Flow_Persist_Enqueue</bpmn:incoming>
+      <bpmn:outgoing>Flow_Enqueue_Emit</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Emit" name="emit ClickHouse&#10;accepted">
+      <bpmn:incoming>Flow_Enqueue_Emit</bpmn:incoming>
+      <bpmn:outgoing>Flow_Emit_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_201" name="201 OrderOut">
+      <bpmn:incoming>Flow_Emit_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Sequence flows -->
+    <bpmn:sequenceFlow id="Flow_Request_RateLimit" sourceRef="StartEvent_Request" targetRef="Gateway_RateLimit"/>
+    <bpmn:sequenceFlow id="Flow_RateLimit_Yes" name="ok" sourceRef="Gateway_RateLimit" targetRef="Gateway_Active"/>
+    <bpmn:sequenceFlow id="Flow_RateLimit_No" name="bucket empty" sourceRef="Gateway_RateLimit" targetRef="EndEvent_429"/>
+    <bpmn:sequenceFlow id="Flow_Active_Yes" name="active" sourceRef="Gateway_Active" targetRef="ServiceTask_INCR"/>
+    <bpmn:sequenceFlow id="Flow_Active_No" name="not active" sourceRef="Gateway_Active" targetRef="ServiceTask_EmitNotActive"/>
+    <bpmn:sequenceFlow id="Flow_EmitNotActive_End" sourceRef="ServiceTask_EmitNotActive" targetRef="EndEvent_400_NotActive"/>
+    <bpmn:sequenceFlow id="Flow_INCR_PerUserGW" sourceRef="ServiceTask_INCR" targetRef="Gateway_PerUser"/>
+    <bpmn:sequenceFlow id="Flow_PerUser_Yes" name="ok" sourceRef="Gateway_PerUser" targetRef="ServiceTask_Reserve"/>
+    <bpmn:sequenceFlow id="Flow_PerUser_No" name="exceeded" sourceRef="Gateway_PerUser" targetRef="ServiceTask_DecPerUser"/>
+    <bpmn:sequenceFlow id="Flow_DecPerUser_Emit" sourceRef="ServiceTask_DecPerUser" targetRef="ServiceTask_EmitPerUser"/>
+    <bpmn:sequenceFlow id="Flow_EmitPerUser_End" sourceRef="ServiceTask_EmitPerUser" targetRef="EndEvent_400_PerUser"/>
+    <bpmn:sequenceFlow id="Flow_Reserve_StockGW" sourceRef="ServiceTask_Reserve" targetRef="Gateway_Stock"/>
+    <bpmn:sequenceFlow id="Flow_Stock_Yes" name="reserved" sourceRef="Gateway_Stock" targetRef="ServiceTask_Persist"/>
+    <bpmn:sequenceFlow id="Flow_Stock_No" name="insufficient" sourceRef="Gateway_Stock" targetRef="ServiceTask_DecStock"/>
+    <bpmn:sequenceFlow id="Flow_DecStock_Emit" sourceRef="ServiceTask_DecStock" targetRef="ServiceTask_EmitStock"/>
+    <bpmn:sequenceFlow id="Flow_EmitStock_End" sourceRef="ServiceTask_EmitStock" targetRef="EndEvent_409"/>
+    <bpmn:sequenceFlow id="Flow_Persist_Enqueue" sourceRef="ServiceTask_Persist" targetRef="ServiceTask_Enqueue"/>
+    <bpmn:sequenceFlow id="Flow_Enqueue_Emit" sourceRef="ServiceTask_Enqueue" targetRef="ServiceTask_Emit"/>
+    <bpmn:sequenceFlow id="Flow_Emit_End" sourceRef="ServiceTask_Emit" targetRef="EndEvent_201"/>
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_FlashsaleBuy">
+
+      <!-- Main flow (y_center=120) -->
+      <bpmndi:BPMNShape id="StartEvent_Request_di" bpmnElement="StartEvent_Request">
+        <dc:Bounds x="152" y="102" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="125" y="145" width="90" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_RateLimit_di" bpmnElement="Gateway_RateLimit" isMarkerVisible="true">
+        <dc:Bounds x="225" y="95" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="215" y="50" width="70" height="40"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_Active_di" bpmnElement="Gateway_Active" isMarkerVisible="true">
+        <dc:Bounds x="335" y="95" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="325" y="50" width="70" height="40"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_INCR_di" bpmnElement="ServiceTask_INCR">
+        <dc:Bounds x="425" y="80" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_PerUser_di" bpmnElement="Gateway_PerUser" isMarkerVisible="true">
+        <dc:Bounds x="600" y="95" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="585" y="50" width="80" height="40"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Reserve_di" bpmnElement="ServiceTask_Reserve">
+        <dc:Bounds x="690" y="80" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_Stock_di" bpmnElement="Gateway_Stock" isMarkerVisible="true">
+        <dc:Bounds x="865" y="95" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="850" y="50" width="80" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Persist_di" bpmnElement="ServiceTask_Persist">
+        <dc:Bounds x="955" y="80" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Enqueue_di" bpmnElement="ServiceTask_Enqueue">
+        <dc:Bounds x="1155" y="80" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Emit_di" bpmnElement="ServiceTask_Emit">
+        <dc:Bounds x="1335" y="80" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_201_di" bpmnElement="EndEvent_201">
+        <dc:Bounds x="1515" y="102" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="1495" y="145" width="80" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Rejection branch: 429 (below Gateway_RateLimit center x=250) -->
+      <bpmndi:BPMNShape id="EndEvent_429_di" bpmnElement="EndEvent_429">
+        <dc:Bounds x="232" y="232" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="195" y="275" width="110" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Rejection branch: sale not active (below Gateway_Active center x=360) -->
+      <bpmndi:BPMNShape id="ServiceTask_EmitNotActive_di" bpmnElement="ServiceTask_EmitNotActive">
+        <dc:Bounds x="290" y="220" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_400_NotActive_di" bpmnElement="EndEvent_400_NotActive">
+        <dc:Bounds x="342" y="340" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="310" y="383" width="100" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Rejection branch: per-user limit (below Gateway_PerUser center x=625) -->
+      <bpmndi:BPMNShape id="ServiceTask_DecPerUser_di" bpmnElement="ServiceTask_DecPerUser">
+        <dc:Bounds x="555" y="220" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_EmitPerUser_di" bpmnElement="ServiceTask_EmitPerUser">
+        <dc:Bounds x="555" y="340" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_400_PerUser_di" bpmnElement="EndEvent_400_PerUser">
+        <dc:Bounds x="607" y="460" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="575" y="503" width="100" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Rejection branch: insufficient stock (below Gateway_Stock center x=890) -->
+      <bpmndi:BPMNShape id="ServiceTask_DecStock_di" bpmnElement="ServiceTask_DecStock">
+        <dc:Bounds x="820" y="220" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_EmitStock_di" bpmnElement="ServiceTask_EmitStock">
+        <dc:Bounds x="820" y="340" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_409_di" bpmnElement="EndEvent_409">
+        <dc:Bounds x="872" y="460" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="838" y="503" width="110" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Edges: main flow -->
+      <bpmndi:BPMNEdge id="Flow_Request_RateLimit_di" bpmnElement="Flow_Request_RateLimit">
+        <di:waypoint x="188" y="120"/>
+        <di:waypoint x="225" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_RateLimit_Yes_di" bpmnElement="Flow_RateLimit_Yes">
+        <di:waypoint x="275" y="120"/>
+        <di:waypoint x="335" y="120"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="295" y="100" width="15" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Active_Yes_di" bpmnElement="Flow_Active_Yes">
+        <di:waypoint x="385" y="120"/>
+        <di:waypoint x="425" y="120"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="392" y="100" width="35" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_INCR_PerUserGW_di" bpmnElement="Flow_INCR_PerUserGW">
+        <di:waypoint x="565" y="120"/>
+        <di:waypoint x="600" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_PerUser_Yes_di" bpmnElement="Flow_PerUser_Yes">
+        <di:waypoint x="650" y="120"/>
+        <di:waypoint x="690" y="120"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="660" y="100" width="15" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Reserve_StockGW_di" bpmnElement="Flow_Reserve_StockGW">
+        <di:waypoint x="830" y="120"/>
+        <di:waypoint x="865" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Stock_Yes_di" bpmnElement="Flow_Stock_Yes">
+        <di:waypoint x="915" y="120"/>
+        <di:waypoint x="955" y="120"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="918" y="100" width="40" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Persist_Enqueue_di" bpmnElement="Flow_Persist_Enqueue">
+        <di:waypoint x="1115" y="120"/>
+        <di:waypoint x="1155" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Enqueue_Emit_di" bpmnElement="Flow_Enqueue_Emit">
+        <di:waypoint x="1295" y="120"/>
+        <di:waypoint x="1335" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Emit_End_di" bpmnElement="Flow_Emit_End">
+        <di:waypoint x="1475" y="120"/>
+        <di:waypoint x="1515" y="120"/>
+      </bpmndi:BPMNEdge>
+
+      <!-- Edges: rejection branches -->
+      <bpmndi:BPMNEdge id="Flow_RateLimit_No_di" bpmnElement="Flow_RateLimit_No">
+        <di:waypoint x="250" y="145"/>
+        <di:waypoint x="250" y="232"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="170" y="180" width="78" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Active_No_di" bpmnElement="Flow_Active_No">
+        <di:waypoint x="360" y="145"/>
+        <di:waypoint x="360" y="220"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="288" y="180" width="64" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_EmitNotActive_End_di" bpmnElement="Flow_EmitNotActive_End">
+        <di:waypoint x="360" y="300"/>
+        <di:waypoint x="360" y="340"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_PerUser_No_di" bpmnElement="Flow_PerUser_No">
+        <di:waypoint x="625" y="145"/>
+        <di:waypoint x="625" y="220"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="555" y="180" width="62" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_DecPerUser_Emit_di" bpmnElement="Flow_DecPerUser_Emit">
+        <di:waypoint x="625" y="300"/>
+        <di:waypoint x="625" y="340"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_EmitPerUser_End_di" bpmnElement="Flow_EmitPerUser_End">
+        <di:waypoint x="625" y="420"/>
+        <di:waypoint x="625" y="460"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Stock_No_di" bpmnElement="Flow_Stock_No">
+        <di:waypoint x="890" y="145"/>
+        <di:waypoint x="890" y="220"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="815" y="180" width="70" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_DecStock_Emit_di" bpmnElement="Flow_DecStock_Emit">
+        <di:waypoint x="890" y="300"/>
+        <di:waypoint x="890" y="340"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_EmitStock_End_di" bpmnElement="Flow_EmitStock_End">
+        <di:waypoint x="890" y="420"/>
+        <di:waypoint x="890" y="460"/>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

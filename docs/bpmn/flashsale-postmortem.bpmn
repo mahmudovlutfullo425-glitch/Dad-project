@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_FlashsalePostmortem"
+                  targetNamespace="http://flashsale.ecom/bpmn">
+  <bpmn:process id="Process_FlashsalePostmortem" name="Flash-sale post-mortem (Celery Beat / 5 min)" isExecutable="false">
+
+    <bpmn:startEvent id="TimerStart_Every5Min" name="Every 5 min&#10;(Celery Beat)">
+      <bpmn:outgoing>Flow_Start_Query</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="Timer_5min">
+        <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R/PT5M</bpmn:timeCycle>
+      </bpmn:timerEventDefinition>
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="ServiceTask_Query" name="SELECT flash_sales&#10;WHERE ends_at &lt; now&#10;AND status &#8712; {scheduled, active}">
+      <bpmn:incoming>Flow_Start_Query</bpmn:incoming>
+      <bpmn:outgoing>Flow_Query_AnyGW</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_AnyCandidates" name="Any candidates?">
+      <bpmn:incoming>Flow_Query_AnyGW</bpmn:incoming>
+      <bpmn:outgoing>Flow_NoOp</bpmn:outgoing>
+      <bpmn:outgoing>Flow_HasCand</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:endEvent id="EndEvent_NoOp" name="Nothing to end">
+      <bpmn:incoming>Flow_NoOp</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:serviceTask id="ServiceTask_FlipStatus" name="UPDATE flash_sales&#10;SET status='ended'">
+      <bpmn:incoming>Flow_HasCand</bpmn:incoming>
+      <bpmn:outgoing>Flow_Flip_QueryCH</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_QueryCH" name="query ClickHouse&#10;flash_sale_minute_stats">
+      <bpmn:incoming>Flow_Flip_QueryCH</bpmn:incoming>
+      <bpmn:outgoing>Flow_QueryCH_ChGW</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_ChAvailable" name="stats != null?">
+      <bpmn:incoming>Flow_QueryCH_ChGW</bpmn:incoming>
+      <bpmn:outgoing>Flow_ChYes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_ChNo</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_MergeStats" name="payload.analytics_source = 'clickhouse'&#10;payload.update(stats)">
+      <bpmn:incoming>Flow_ChYes</bpmn:incoming>
+      <bpmn:outgoing>Flow_MergeJoin</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_FallbackPayload" name="payload.analytics_source = 'audit_log_only'">
+      <bpmn:incoming>Flow_ChNo</bpmn:incoming>
+      <bpmn:outgoing>Flow_Fallback_Join</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_Join">
+      <bpmn:incoming>Flow_MergeJoin</bpmn:incoming>
+      <bpmn:incoming>Flow_Fallback_Join</bpmn:incoming>
+      <bpmn:outgoing>Flow_Join_Audit</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_Audit" name="INSERT audit_log&#10;action='flash_sale.ended'&#10;payload={name, window, stats}">
+      <bpmn:incoming>Flow_Join_Audit</bpmn:incoming>
+      <bpmn:outgoing>Flow_Audit_End</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Done" name="Done&#10;(returns ended_ids)">
+      <bpmn:incoming>Flow_Audit_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:textAnnotation id="TextAnnotation_Note">
+      <bpmn:text>The five tasks inside the loop share a sequential multi-instance characteristic — one pass per candidate sale. The ClickHouse-down branch is a fail-soft: Postgres still flips the sale to 'ended' even if the analytics source is unreachable, so the post-mortem is never blocked on ClickHouse availability.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Note" sourceRef="Gateway_ChAvailable" targetRef="TextAnnotation_Note"/>
+
+    <!-- Sequence flows -->
+    <bpmn:sequenceFlow id="Flow_Start_Query" sourceRef="TimerStart_Every5Min" targetRef="ServiceTask_Query"/>
+    <bpmn:sequenceFlow id="Flow_Query_AnyGW" sourceRef="ServiceTask_Query" targetRef="Gateway_AnyCandidates"/>
+    <bpmn:sequenceFlow id="Flow_NoOp" name="no" sourceRef="Gateway_AnyCandidates" targetRef="EndEvent_NoOp"/>
+    <bpmn:sequenceFlow id="Flow_HasCand" name="yes (per sale)" sourceRef="Gateway_AnyCandidates" targetRef="ServiceTask_FlipStatus"/>
+    <bpmn:sequenceFlow id="Flow_Flip_QueryCH" sourceRef="ServiceTask_FlipStatus" targetRef="ServiceTask_QueryCH"/>
+    <bpmn:sequenceFlow id="Flow_QueryCH_ChGW" sourceRef="ServiceTask_QueryCH" targetRef="Gateway_ChAvailable"/>
+    <bpmn:sequenceFlow id="Flow_ChYes" name="ok" sourceRef="Gateway_ChAvailable" targetRef="ServiceTask_MergeStats"/>
+    <bpmn:sequenceFlow id="Flow_ChNo" name="ClickHouse unreachable" sourceRef="Gateway_ChAvailable" targetRef="ServiceTask_FallbackPayload"/>
+    <bpmn:sequenceFlow id="Flow_MergeJoin" sourceRef="ServiceTask_MergeStats" targetRef="Gateway_Join"/>
+    <bpmn:sequenceFlow id="Flow_Fallback_Join" sourceRef="ServiceTask_FallbackPayload" targetRef="Gateway_Join"/>
+    <bpmn:sequenceFlow id="Flow_Join_Audit" sourceRef="Gateway_Join" targetRef="ServiceTask_Audit"/>
+    <bpmn:sequenceFlow id="Flow_Audit_End" sourceRef="ServiceTask_Audit" targetRef="EndEvent_Done"/>
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_FlashsalePostmortem">
+
+      <!-- Main row y_center=240 -->
+      <bpmndi:BPMNShape id="TimerStart_Every5Min_di" bpmnElement="TimerStart_Every5Min">
+        <dc:Bounds x="160" y="222" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="138" y="265" width="80" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Query_di" bpmnElement="ServiceTask_Query">
+        <dc:Bounds x="240" y="200" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_AnyCandidates_di" bpmnElement="Gateway_AnyCandidates" isMarkerVisible="true">
+        <dc:Bounds x="480" y="215" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="465" y="185" width="80" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_NoOp_di" bpmnElement="EndEvent_NoOp">
+        <dc:Bounds x="487" y="100" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="467" y="80" width="80" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_FlipStatus_di" bpmnElement="ServiceTask_FlipStatus">
+        <dc:Bounds x="580" y="200" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_QueryCH_di" bpmnElement="ServiceTask_QueryCH">
+        <dc:Bounds x="780" y="200" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_ChAvailable_di" bpmnElement="Gateway_ChAvailable" isMarkerVisible="true">
+        <dc:Bounds x="1000" y="215" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="985" y="185" width="80" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_MergeStats_di" bpmnElement="ServiceTask_MergeStats">
+        <dc:Bounds x="1090" y="200" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_FallbackPayload_di" bpmnElement="ServiceTask_FallbackPayload">
+        <dc:Bounds x="1090" y="360" width="200" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_Join_di" bpmnElement="Gateway_Join" isMarkerVisible="true">
+        <dc:Bounds x="1340" y="215" width="50" height="50"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Audit_di" bpmnElement="ServiceTask_Audit">
+        <dc:Bounds x="1430" y="200" width="220" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Done_di" bpmnElement="EndEvent_Done">
+        <dc:Bounds x="1690" y="222" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="1660" y="265" width="100" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="TextAnnotation_Note_di" bpmnElement="TextAnnotation_Note">
+        <dc:Bounds x="780" y="480" width="430" height="100"/>
+      </bpmndi:BPMNShape>
+
+      <!-- Edges -->
+      <bpmndi:BPMNEdge id="Flow_Start_Query_di" bpmnElement="Flow_Start_Query">
+        <di:waypoint x="196" y="240"/>
+        <di:waypoint x="240" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Query_AnyGW_di" bpmnElement="Flow_Query_AnyGW">
+        <di:waypoint x="440" y="240"/>
+        <di:waypoint x="480" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_NoOp_di" bpmnElement="Flow_NoOp">
+        <di:waypoint x="505" y="215"/>
+        <di:waypoint x="505" y="136"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="510" y="165" width="20" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_HasCand_di" bpmnElement="Flow_HasCand">
+        <di:waypoint x="530" y="240"/>
+        <di:waypoint x="580" y="240"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="530" y="215" width="60" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Flip_QueryCH_di" bpmnElement="Flow_Flip_QueryCH">
+        <di:waypoint x="740" y="240"/>
+        <di:waypoint x="780" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_QueryCH_ChGW_di" bpmnElement="Flow_QueryCH_ChGW">
+        <di:waypoint x="960" y="240"/>
+        <di:waypoint x="1000" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ChYes_di" bpmnElement="Flow_ChYes">
+        <di:waypoint x="1050" y="240"/>
+        <di:waypoint x="1090" y="240"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="1055" y="220" width="20" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_ChNo_di" bpmnElement="Flow_ChNo">
+        <di:waypoint x="1025" y="265"/>
+        <di:waypoint x="1025" y="400"/>
+        <di:waypoint x="1090" y="400"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="935" y="320" width="80" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_MergeJoin_di" bpmnElement="Flow_MergeJoin">
+        <di:waypoint x="1290" y="240"/>
+        <di:waypoint x="1340" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Fallback_Join_di" bpmnElement="Flow_Fallback_Join">
+        <di:waypoint x="1290" y="400"/>
+        <di:waypoint x="1365" y="400"/>
+        <di:waypoint x="1365" y="265"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Join_Audit_di" bpmnElement="Flow_Join_Audit">
+        <di:waypoint x="1390" y="240"/>
+        <di:waypoint x="1430" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Audit_End_di" bpmnElement="Flow_Audit_End">
+        <di:waypoint x="1650" y="240"/>
+        <di:waypoint x="1690" y="240"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Note_di" bpmnElement="Association_Note">
+        <di:waypoint x="1025" y="265"/>
+        <di:waypoint x="1000" y="480"/>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

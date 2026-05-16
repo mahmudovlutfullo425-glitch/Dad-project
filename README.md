@@ -411,8 +411,9 @@ scripts/
 └── ratelimit_grpc_check.py 429-from-inventory smoke test
 docs/
 ├── adr/                    Architecture decision records
-├── bpmn/                   5 workflow diagrams (Step 14)
-└── diagrams/               ER + architecture diagrams
+├── bpmn/                   5 BPMN 2.0 workflow diagrams (R10)
+├── diagrams/               ER + architecture diagrams
+└── measurements/           R6 k6 results + methodology
 docker-compose.yml          All 16 services
 Makefile                    Operational targets
 .env.example                Env-var reference

@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_ExpireStuckOrders"
+                  targetNamespace="http://flashsale.ecom/bpmn">
+  <bpmn:process id="Process_ExpireStuckOrders" name="Expire stuck pending orders (Celery Beat / 5 min)" isExecutable="false">
+
+    <bpmn:startEvent id="TimerStart_Every5Min" name="Every 5 min&#10;(Celery Beat)">
+      <bpmn:outgoing>Flow_Start_Query</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="Timer_5min">
+        <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R/PT5M</bpmn:timeCycle>
+      </bpmn:timerEventDefinition>
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="ServiceTask_Query" name="SELECT orders&#10;WHERE status='pending'&#10;AND placed_at &lt; now - 30 min&#10;LIMIT 200">
+      <bpmn:incoming>Flow_Start_Query</bpmn:incoming>
+      <bpmn:outgoing>Flow_Query_Gateway</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_AnyStuck" name="Any rows?">
+      <bpmn:incoming>Flow_Query_Gateway</bpmn:incoming>
+      <bpmn:outgoing>Flow_NoRows</bpmn:outgoing>
+      <bpmn:outgoing>Flow_HasRows</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:endEvent id="EndEvent_NoOp" name="No stuck orders">
+      <bpmn:incoming>Flow_NoRows</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Per-stuck-order block: marked as sequential multi-instance via -->
+    <!-- the standard BPMN loop characteristic, so the diagram makes it -->
+    <!-- explicit that the four service tasks execute once per row.    -->
+    <bpmn:serviceTask id="ServiceTask_Release" name="gRPC ReleaseReservation&#10;(if reservation_id)">
+      <bpmn:incoming>Flow_HasRows</bpmn:incoming>
+      <bpmn:outgoing>Flow_Release_Decr</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Decrby" name="DECRBY fs_purchased&#10;:{fsid}:{uid}&#10;(if flash_sale_id)">
+      <bpmn:incoming>Flow_Release_Decr</bpmn:incoming>
+      <bpmn:outgoing>Flow_Decr_Cancel</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Cancel" name="UPDATE orders&#10;SET status='cancelled'">
+      <bpmn:incoming>Flow_Decr_Cancel</bpmn:incoming>
+      <bpmn:outgoing>Flow_Cancel_Audit</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Audit" name="INSERT audit_log&#10;action='order.cancelled.stuck'">
+      <bpmn:incoming>Flow_Cancel_Audit</bpmn:incoming>
+      <bpmn:outgoing>Flow_Audit_Emit</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_Emit" name="emit ClickHouse&#10;order_events (cancelled)">
+      <bpmn:incoming>Flow_Audit_Emit</bpmn:incoming>
+      <bpmn:outgoing>Flow_Emit_End</bpmn:outgoing>
+      <bpmn:multiInstanceLoopCharacteristics isSequential="true"/>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Done" name="Done&#10;(N cancelled, M released)">
+      <bpmn:incoming>Flow_Emit_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:textAnnotation id="TextAnnotation_Note">
+      <bpmn:text>The four per-order tasks share a sequential multi-instance loop. Release + DECRBY are conditional (skipped when the order has no reservation / flash sale). Postgres commit happens once for the whole batch; ClickHouse emit runs after the commit so a rollback never publishes a phantom 'cancelled' event.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Note" sourceRef="ServiceTask_Cancel" targetRef="TextAnnotation_Note"/>
+
+    <!-- Sequence flows -->
+    <bpmn:sequenceFlow id="Flow_Start_Query" sourceRef="TimerStart_Every5Min" targetRef="ServiceTask_Query"/>
+    <bpmn:sequenceFlow id="Flow_Query_Gateway" sourceRef="ServiceTask_Query" targetRef="Gateway_AnyStuck"/>
+    <bpmn:sequenceFlow id="Flow_NoRows" name="no" sourceRef="Gateway_AnyStuck" targetRef="EndEvent_NoOp"/>
+    <bpmn:sequenceFlow id="Flow_HasRows" name="yes (for each row)" sourceRef="Gateway_AnyStuck" targetRef="ServiceTask_Release"/>
+    <bpmn:sequenceFlow id="Flow_Release_Decr" sourceRef="ServiceTask_Release" targetRef="ServiceTask_Decrby"/>
+    <bpmn:sequenceFlow id="Flow_Decr_Cancel" sourceRef="ServiceTask_Decrby" targetRef="ServiceTask_Cancel"/>
+    <bpmn:sequenceFlow id="Flow_Cancel_Audit" sourceRef="ServiceTask_Cancel" targetRef="ServiceTask_Audit"/>
+    <bpmn:sequenceFlow id="Flow_Audit_Emit" sourceRef="ServiceTask_Audit" targetRef="ServiceTask_Emit"/>
+    <bpmn:sequenceFlow id="Flow_Emit_End" sourceRef="ServiceTask_Emit" targetRef="EndEvent_Done"/>
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_ExpireStuckOrders">
+
+      <bpmndi:BPMNShape id="TimerStart_Every5Min_di" bpmnElement="TimerStart_Every5Min">
+        <dc:Bounds x="160" y="182" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="138" y="225" width="80" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Query_di" bpmnElement="ServiceTask_Query">
+        <dc:Bounds x="240" y="160" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_AnyStuck_di" bpmnElement="Gateway_AnyStuck" isMarkerVisible="true">
+        <dc:Bounds x="460" y="175" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="455" y="145" width="60" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_NoOp_di" bpmnElement="EndEvent_NoOp">
+        <dc:Bounds x="467" y="60" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="440" y="40" width="90" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="ServiceTask_Release_di" bpmnElement="ServiceTask_Release">
+        <dc:Bounds x="560" y="160" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Decrby_di" bpmnElement="ServiceTask_Decrby">
+        <dc:Bounds x="760" y="160" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Cancel_di" bpmnElement="ServiceTask_Cancel">
+        <dc:Bounds x="960" y="160" width="160" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Audit_di" bpmnElement="ServiceTask_Audit">
+        <dc:Bounds x="1160" y="160" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_Emit_di" bpmnElement="ServiceTask_Emit">
+        <dc:Bounds x="1380" y="160" width="180" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Done_di" bpmnElement="EndEvent_Done">
+        <dc:Bounds x="1600" y="182" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="1570" y="225" width="100" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="TextAnnotation_Note_di" bpmnElement="TextAnnotation_Note">
+        <dc:Bounds x="720" y="320" width="450" height="100"/>
+      </bpmndi:BPMNShape>
+
+      <!-- Edges -->
+      <bpmndi:BPMNEdge id="Flow_Start_Query_di" bpmnElement="Flow_Start_Query">
+        <di:waypoint x="196" y="200"/>
+        <di:waypoint x="240" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Query_Gateway_di" bpmnElement="Flow_Query_Gateway">
+        <di:waypoint x="420" y="200"/>
+        <di:waypoint x="460" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_NoRows_di" bpmnElement="Flow_NoRows">
+        <di:waypoint x="485" y="175"/>
+        <di:waypoint x="485" y="96"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="490" y="125" width="20" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_HasRows_di" bpmnElement="Flow_HasRows">
+        <di:waypoint x="510" y="200"/>
+        <di:waypoint x="560" y="200"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="510" y="175" width="50" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Release_Decr_di" bpmnElement="Flow_Release_Decr">
+        <di:waypoint x="720" y="200"/>
+        <di:waypoint x="760" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Decr_Cancel_di" bpmnElement="Flow_Decr_Cancel">
+        <di:waypoint x="920" y="200"/>
+        <di:waypoint x="960" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Cancel_Audit_di" bpmnElement="Flow_Cancel_Audit">
+        <di:waypoint x="1120" y="200"/>
+        <di:waypoint x="1160" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Audit_Emit_di" bpmnElement="Flow_Audit_Emit">
+        <di:waypoint x="1340" y="200"/>
+        <di:waypoint x="1380" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Emit_End_di" bpmnElement="Flow_Emit_End">
+        <di:waypoint x="1560" y="200"/>
+        <di:waypoint x="1600" y="200"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Note_di" bpmnElement="Association_Note">
+        <di:waypoint x="1040" y="240"/>
+        <di:waypoint x="945" y="320"/>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

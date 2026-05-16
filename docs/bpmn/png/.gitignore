@@ -1,0 +1,7 @@
+# BPMN PNG exports — generated from the sibling .bpmn sources by
+# opening each in https://demo.bpmn.io/ and `File → Export as PNG`.
+# The .bpmn files are canonical; PNGs are build artefacts re-exported
+# for the design report, so they don't belong in git.
+*.png
+*.svg
+!.gitignore

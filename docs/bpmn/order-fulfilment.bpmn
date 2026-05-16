@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_OrderFulfilment"
+                  targetNamespace="http://flashsale.ecom/bpmn">
+  <bpmn:process id="Process_OrderFulfilment" name="Order Fulfilment Chain" isExecutable="false">
+
+    <!-- ============================================================ -->
+    <!-- Happy path: 5 Celery tasks chained with .si (immutable sigs) -->
+    <!-- ============================================================ -->
+    <bpmn:startEvent id="StartEvent_Begin" name="Order placed (pending)">
+      <bpmn:outgoing>Flow_Begin_Capture</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="ServiceTask_CapturePayment" name="capture_payment&#10;(pending &#8594; paid)">
+      <bpmn:incoming>Flow_Begin_Capture</bpmn:incoming>
+      <bpmn:outgoing>Flow_Capture_PaymentGW</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_PaymentOK" name="Payment ok?">
+      <bpmn:incoming>Flow_Capture_PaymentGW</bpmn:incoming>
+      <bpmn:outgoing>Flow_PaymentOK_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_PaymentOK_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_CommitInventory" name="commit_inventory&#10;(gRPC CommitReservation)">
+      <bpmn:incoming>Flow_PaymentOK_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_Commit_CommitGW</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_CommitOK" name="Commit ok?">
+      <bpmn:incoming>Flow_Commit_CommitGW</bpmn:incoming>
+      <bpmn:outgoing>Flow_CommitOK_Yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_CommitOK_No</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="ServiceTask_GenerateInvoice" name="generate_invoice&#10;(audit_log row)">
+      <bpmn:incoming>Flow_CommitOK_Yes</bpmn:incoming>
+      <bpmn:outgoing>Flow_Invoice_Notify</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_NotifyCustomer" name="notify_customer&#10;(log + audit)">
+      <bpmn:incoming>Flow_Invoice_Notify</bpmn:incoming>
+      <bpmn:outgoing>Flow_Notify_Schedule</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_ScheduleDispatch" name="schedule_dispatch&#10;(paid &#8594; fulfilling)">
+      <bpmn:incoming>Flow_Notify_Schedule</bpmn:incoming>
+      <bpmn:outgoing>Flow_Schedule_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Fulfilled" name="Order fulfilling">
+      <bpmn:incoming>Flow_Schedule_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- ============================================================ -->
+    <!-- Compensation: payment-failure branch                          -->
+    <!--   PLANNED for Step 17; current code = happy path only         -->
+    <!-- ============================================================ -->
+    <bpmn:serviceTask id="ServiceTask_ReleaseReservation" name="release_reservation&#10;(gRPC ReleaseReservation)">
+      <bpmn:incoming>Flow_PaymentOK_No</bpmn:incoming>
+      <bpmn:outgoing>Flow_Release_CancelPF</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_CancelOrderPF" name="cancel_order&#10;(status &#8594; cancelled)">
+      <bpmn:incoming>Flow_Release_CancelPF</bpmn:incoming>
+      <bpmn:outgoing>Flow_CancelPF_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_PaymentFailed" name="Payment failed">
+      <bpmn:incoming>Flow_CancelPF_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- ============================================================ -->
+    <!-- Compensation: inventory-commit-failure branch                 -->
+    <!--   PLANNED for Step 17; current code = happy path only         -->
+    <!-- ============================================================ -->
+    <bpmn:serviceTask id="ServiceTask_RefundPayment" name="refund_payment&#10;(reverse capture)">
+      <bpmn:incoming>Flow_CommitOK_No</bpmn:incoming>
+      <bpmn:outgoing>Flow_Refund_CancelIF</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="ServiceTask_CancelOrderIF" name="cancel_order&#10;(status &#8594; cancelled)">
+      <bpmn:incoming>Flow_Refund_CancelIF</bpmn:incoming>
+      <bpmn:outgoing>Flow_CancelIF_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_InventoryFailed" name="Inventory commit failed">
+      <bpmn:incoming>Flow_CancelIF_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- ============================================================ -->
+    <!-- Annotation: clarifies compensation branches are design intent -->
+    <!-- ============================================================ -->
+    <bpmn:textAnnotation id="TextAnnotation_Compensation">
+      <bpmn:text>Compensation branches are modelled for design completeness. The current code path implements only the happy path; payment / inventory failures surface as Celery autoretry, then the stuck-pending sweep cancels the order (see expire-stuck-orders.bpmn). Wiring explicit compensation tasks is scheduled for Step 17.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_Compensation_PF" sourceRef="ServiceTask_ReleaseReservation" targetRef="TextAnnotation_Compensation"/>
+    <bpmn:association id="Association_Compensation_IF" sourceRef="ServiceTask_RefundPayment" targetRef="TextAnnotation_Compensation"/>
+
+    <!-- ============================================================ -->
+    <!-- Sequence flows                                                -->
+    <!-- ============================================================ -->
+    <bpmn:sequenceFlow id="Flow_Begin_Capture" sourceRef="StartEvent_Begin" targetRef="ServiceTask_CapturePayment"/>
+    <bpmn:sequenceFlow id="Flow_Capture_PaymentGW" sourceRef="ServiceTask_CapturePayment" targetRef="Gateway_PaymentOK"/>
+    <bpmn:sequenceFlow id="Flow_PaymentOK_Yes" name="ok" sourceRef="Gateway_PaymentOK" targetRef="ServiceTask_CommitInventory"/>
+    <bpmn:sequenceFlow id="Flow_PaymentOK_No" name="payment failed" sourceRef="Gateway_PaymentOK" targetRef="ServiceTask_ReleaseReservation"/>
+    <bpmn:sequenceFlow id="Flow_Release_CancelPF" sourceRef="ServiceTask_ReleaseReservation" targetRef="ServiceTask_CancelOrderPF"/>
+    <bpmn:sequenceFlow id="Flow_CancelPF_End" sourceRef="ServiceTask_CancelOrderPF" targetRef="EndEvent_PaymentFailed"/>
+    <bpmn:sequenceFlow id="Flow_Commit_CommitGW" sourceRef="ServiceTask_CommitInventory" targetRef="Gateway_CommitOK"/>
+    <bpmn:sequenceFlow id="Flow_CommitOK_Yes" name="ok" sourceRef="Gateway_CommitOK" targetRef="ServiceTask_GenerateInvoice"/>
+    <bpmn:sequenceFlow id="Flow_CommitOK_No" name="commit failed" sourceRef="Gateway_CommitOK" targetRef="ServiceTask_RefundPayment"/>
+    <bpmn:sequenceFlow id="Flow_Refund_CancelIF" sourceRef="ServiceTask_RefundPayment" targetRef="ServiceTask_CancelOrderIF"/>
+    <bpmn:sequenceFlow id="Flow_CancelIF_End" sourceRef="ServiceTask_CancelOrderIF" targetRef="EndEvent_InventoryFailed"/>
+    <bpmn:sequenceFlow id="Flow_Invoice_Notify" sourceRef="ServiceTask_GenerateInvoice" targetRef="ServiceTask_NotifyCustomer"/>
+    <bpmn:sequenceFlow id="Flow_Notify_Schedule" sourceRef="ServiceTask_NotifyCustomer" targetRef="ServiceTask_ScheduleDispatch"/>
+    <bpmn:sequenceFlow id="Flow_Schedule_End" sourceRef="ServiceTask_ScheduleDispatch" targetRef="EndEvent_Fulfilled"/>
+  </bpmn:process>
+
+  <!-- ============================================================ -->
+  <!-- Diagram Interchange (visual layout)                           -->
+  <!--   Main flow:    y_center = 120                                -->
+  <!--   Payment fail: y_center = 260 .. 440                         -->
+  <!--   Commit fail:  y_center = 260 .. 440 (separate x column)     -->
+  <!-- ============================================================ -->
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_OrderFulfilment">
+
+      <!-- Main flow shapes -->
+      <bpmndi:BPMNShape id="StartEvent_Begin_di" bpmnElement="StartEvent_Begin">
+        <dc:Bounds x="160" y="102" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="140" y="145" width="80" height="27"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_CapturePayment_di" bpmnElement="ServiceTask_CapturePayment">
+        <dc:Bounds x="240" y="80" width="120" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_PaymentOK_di" bpmnElement="Gateway_PaymentOK" isMarkerVisible="true">
+        <dc:Bounds x="395" y="95" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="385" y="65" width="70" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_CommitInventory_di" bpmnElement="ServiceTask_CommitInventory">
+        <dc:Bounds x="490" y="80" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Gateway_CommitOK_di" bpmnElement="Gateway_CommitOK" isMarkerVisible="true">
+        <dc:Bounds x="665" y="95" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="660" y="65" width="60" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_GenerateInvoice_di" bpmnElement="ServiceTask_GenerateInvoice">
+        <dc:Bounds x="760" y="80" width="120" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_NotifyCustomer_di" bpmnElement="ServiceTask_NotifyCustomer">
+        <dc:Bounds x="920" y="80" width="120" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_ScheduleDispatch_di" bpmnElement="ServiceTask_ScheduleDispatch">
+        <dc:Bounds x="1080" y="80" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_Fulfilled_di" bpmnElement="EndEvent_Fulfilled">
+        <dc:Bounds x="1270" y="102" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="1248" y="145" width="80" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Payment-fail branch (below Gateway_PaymentOK at x=395+25=420) -->
+      <bpmndi:BPMNShape id="ServiceTask_ReleaseReservation_di" bpmnElement="ServiceTask_ReleaseReservation">
+        <dc:Bounds x="360" y="240" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_CancelOrderPF_di" bpmnElement="ServiceTask_CancelOrderPF">
+        <dc:Bounds x="360" y="360" width="140" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_PaymentFailed_di" bpmnElement="EndEvent_PaymentFailed">
+        <dc:Bounds x="412" y="480" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="385" y="523" width="90" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Inventory-fail branch (below Gateway_CommitOK at x=665+25=690) -->
+      <bpmndi:BPMNShape id="ServiceTask_RefundPayment_di" bpmnElement="ServiceTask_RefundPayment">
+        <dc:Bounds x="630" y="240" width="120" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ServiceTask_CancelOrderIF_di" bpmnElement="ServiceTask_CancelOrderIF">
+        <dc:Bounds x="630" y="360" width="120" height="80"/>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="EndEvent_InventoryFailed_di" bpmnElement="EndEvent_InventoryFailed">
+        <dc:Bounds x="672" y="480" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="635" y="523" width="120" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <!-- Annotation -->
+      <bpmndi:BPMNShape id="TextAnnotation_Compensation_di" bpmnElement="TextAnnotation_Compensation">
+        <dc:Bounds x="800" y="380" width="320" height="110"/>
+      </bpmndi:BPMNShape>
+
+      <!-- Edges -->
+      <bpmndi:BPMNEdge id="Flow_Begin_Capture_di" bpmnElement="Flow_Begin_Capture">
+        <di:waypoint x="196" y="120"/>
+        <di:waypoint x="240" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Capture_PaymentGW_di" bpmnElement="Flow_Capture_PaymentGW">
+        <di:waypoint x="360" y="120"/>
+        <di:waypoint x="395" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_PaymentOK_Yes_di" bpmnElement="Flow_PaymentOK_Yes">
+        <di:waypoint x="445" y="120"/>
+        <di:waypoint x="490" y="120"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="455" y="100" width="20" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_PaymentOK_No_di" bpmnElement="Flow_PaymentOK_No">
+        <di:waypoint x="420" y="145"/>
+        <di:waypoint x="420" y="190"/>
+        <di:waypoint x="430" y="190"/>
+        <di:waypoint x="430" y="240"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="328" y="178" width="86" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Release_CancelPF_di" bpmnElement="Flow_Release_CancelPF">
+        <di:waypoint x="430" y="320"/>
+        <di:waypoint x="430" y="360"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CancelPF_End_di" bpmnElement="Flow_CancelPF_End">
+        <di:waypoint x="430" y="440"/>
+        <di:waypoint x="430" y="480"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Commit_CommitGW_di" bpmnElement="Flow_Commit_CommitGW">
+        <di:waypoint x="630" y="120"/>
+        <di:waypoint x="665" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CommitOK_Yes_di" bpmnElement="Flow_CommitOK_Yes">
+        <di:waypoint x="715" y="120"/>
+        <di:waypoint x="760" y="120"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="725" y="100" width="20" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CommitOK_No_di" bpmnElement="Flow_CommitOK_No">
+        <di:waypoint x="690" y="145"/>
+        <di:waypoint x="690" y="240"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="600" y="178" width="84" height="14"/></bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Refund_CancelIF_di" bpmnElement="Flow_Refund_CancelIF">
+        <di:waypoint x="690" y="320"/>
+        <di:waypoint x="690" y="360"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_CancelIF_End_di" bpmnElement="Flow_CancelIF_End">
+        <di:waypoint x="690" y="440"/>
+        <di:waypoint x="690" y="480"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Invoice_Notify_di" bpmnElement="Flow_Invoice_Notify">
+        <di:waypoint x="880" y="120"/>
+        <di:waypoint x="920" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Notify_Schedule_di" bpmnElement="Flow_Notify_Schedule">
+        <di:waypoint x="1040" y="120"/>
+        <di:waypoint x="1080" y="120"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_Schedule_End_di" bpmnElement="Flow_Schedule_End">
+        <di:waypoint x="1220" y="120"/>
+        <di:waypoint x="1270" y="120"/>
+      </bpmndi:BPMNEdge>
+
+      <!-- Annotation associations -->
+      <bpmndi:BPMNEdge id="Association_Compensation_PF_di" bpmnElement="Association_Compensation_PF">
+        <di:waypoint x="500" y="280"/>
+        <di:waypoint x="800" y="400"/>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Association_Compensation_IF_di" bpmnElement="Association_Compensation_IF">
+        <di:waypoint x="750" y="280"/>
+        <di:waypoint x="800" y="380"/>
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
