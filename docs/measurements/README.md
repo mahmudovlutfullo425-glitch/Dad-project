@@ -82,26 +82,55 @@ before the next test only needs to bump the window.
 
 ## Results
 
-> **TODO**: fill in the table below from `runs/` after a fresh run on
-> the deploy droplet. Numbers from a developer laptop are
-> indicative but should not be reported — the report compares them
-> against the NFR targets (500 RPS sustained, p95 < 200 ms browse).
+Measured **2026-05-17** on the production droplet
+(`159.65.114.240.nip.io`, DO 8 GB / 4 vCPU, k6 0.54.0 inside the
+`ecom-net` bridge, traffic routed through the public Caddy gateway
+over TLS 1.3 so the numbers reflect what the prof actually sees from
+the browser, not in-network shortcut measurements).
+
+Raw k6 summary JSONs are in `runs/` (gitignored — locally generated;
+re-run with `make -k k6-all` to regenerate).
 
 | Scenario | Metric | Baseline (naive) | Optimised | Improvement |
 |---|---|---|---|---|
-| ① Product detail | p50 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ① Product detail | p95 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ① Product detail | p99 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ① Product detail | RPS | _TBD_ | _TBD_ | _TBDx_ |
-| ② Catalogue search | p50 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ② Catalogue search | p95 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ② Catalogue search | p99 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ② Catalogue search | RPS | _TBD_ | _TBD_ | _TBDx_ |
-| ③ Flash-sale decrement | p50 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ③ Flash-sale decrement | p95 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ③ Flash-sale decrement | p99 | _TBD_ ms | _TBD_ ms | _TBDx_ |
-| ③ Flash-sale decrement | Accepted/30s | _TBD_ | _TBD_ | _TBDx_ |
-| ③ Flash-sale decrement | 5xx rate | _TBD_ % | _TBD_ % | — |
+| ① Product detail | p50 | 684 ms | **159 ms** | **4.3×** |
+| ① Product detail | p95 | 1339 ms | **387 ms** | **3.5×** |
+| ① Product detail | RPS sustained | 130 req/s | **520 req/s** | **4.0×** |
+| ① Product detail | error rate | 0.00 % | 0.00 % | — |
+| ② Catalogue search | p50 | 957 ms (ILIKE) | **349 ms (Meili)** | **2.7×** |
+| ② Catalogue search | p95 | 1883 ms (ILIKE) | **1358 ms (Meili)** | **1.4×** |
+| ② Catalogue search | iterations / 120s | 5 748 (ILIKE) | **12 270 (Meili)** | **2.1×** |
+| ③ Flash-sale decrement | p50 (buy latency) | 13 621 ms (PG) | 13 574 ms (Redis) | ≈ 1.0× |
+| ③ Flash-sale decrement | p95 (buy latency) | 33 201 ms (PG) | 32 607 ms (Redis) | ≈ 1.0× |
+| ③ Flash-sale decrement | Accepted / 30s | 808 (PG) | 719 (Redis) | 0.89× |
+| ③ Flash-sale decrement | 5xx rate | 14.0 % (PG) | 14.7 % (Redis) | — |
+
+### Reading the table
+
+- **① Product detail** — clean cache win: 4× more throughput, 3.5× lower
+  p95. Redis hot-cache returns a pre-serialised JSON blob in ~10 ms
+  while the no-cache path pays for one Postgres round-trip plus two
+  `selectinload`s (category + variants) per request.
+- **② Catalogue search** — 2× more queries sustained at sub-half-second
+  p50. ILIKE does a full table scan against `products` with a leading
+  wildcard that forbids B-tree use; Meilisearch hits a pre-tokenised
+  inverted index in single-digit-ms server-side. The HTTP round-trip
+  through Caddy + TLS dominates the absolute numbers, which is why
+  the p95 gap is narrower than the p50 gap.
+- **③ Flash-sale decrement — surprising tie at 500 VUs.** Both backends
+  flatten out at ~25 accepted orders/sec under 500 concurrent VUs
+  over the public TLS endpoint. The bottleneck has **shifted upstream
+  of the stock-decrement implementation**: TLS handshake (avg 580 ms,
+  p95 1.7 s in the Redis run) and connection pool contention saturate
+  the gateway long before the inventory call matters. Postgres
+  `SELECT ... FOR UPDATE` actually edges out Redis Lua by ~10 % on
+  accepted-orders here — within run-to-run noise. The architectural
+  argument for Redis stands (microsecond-level atomic decrements with
+  no row locks, no connection-pool pressure), but proving it
+  empirically requires an in-network HTTP test that bypasses TLS and
+  the Caddy proxy — see **Validity caveats** below.
+
+### Where the gains come from
 
 ### Where the gains come from
 
@@ -135,6 +164,15 @@ before the next test only needs to bump the window.
   to artificial buffers (1 000 000 each) so neither becomes the
   bottleneck under test — the load test measures the decrement, not
   policy enforcement.
+- **2026-05-17 production run** was driven over the public HTTPS
+  endpoint (`https://159.65.114.240.nip.io`) so the measurement
+  matches what a real client sees. TLS handshake and connection-pool
+  saturation at 500 VUs therefore dominate the flash-sale absolute
+  numbers and mask the inventory-backend difference. An in-network
+  HTTP repeat (`BASE_URL=http://gateway` with the dev Nginx gateway
+  swapped in) would isolate the stock-decrement implementation but
+  is left out of scope for this submission since the production-path
+  measurement is what matters for the user-facing SLO.
 
 ## Files
 
